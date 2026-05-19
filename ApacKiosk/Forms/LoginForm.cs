@@ -1,8 +1,8 @@
 using System;
 using System.Data;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
-using System.Linq;
 using System.Windows.Forms;
 using Microsoft.Data.Sqlite;
 using ApacKiosk.Database;
@@ -14,18 +14,31 @@ namespace ApacKiosk.Forms
     {
         private readonly DatabaseManager _db;
         private readonly ConfigManager _config;
+
         private PictureBox _logoBox;
-        private Label _titleLabel;
+        private Label _appNameLabel;
         private Label _welcomeLabel;
+        private Panel _cardPanel;
+        private Label _cardTitle;
+        private Label _cardSubtitle;
+
+        private ToggleButton _userModeBtn;
+        private ToggleButton _adminModeBtn;
+
+        private Panel _userPanel;
         private ComboBox _userCombo;
         private TextBox _pinBox;
-        private PictureBox _photoBox;
-        private Button _loginButton;
-        private Button _adminButton;
-        private Label _timeInfoLabel;
         private TableLayoutPanel _pinPad;
-        private bool _isAdminMode;
+        private Button _userLoginBtn;
+        private PictureBox _photoBox;
+        private Label _timeInfoLabel;
 
+        private Panel _adminPanel;
+        private TextBox _adminUsernameBox;
+        private TextBox _adminPasswordBox;
+        private Button _adminLoginBtn;
+
+        private bool _isAdminMode;
         public Models.User LoggedInUser { get; private set; }
         public bool IsAdmin { get; private set; }
 
@@ -35,168 +48,287 @@ namespace ApacKiosk.Forms
             _config = config;
             InitializeComponent();
             LoadUsers();
+            SwitchToUserMode();
         }
 
         private void InitializeComponent()
         {
             Text = _config.DisplayName;
-            Size = new Size(800, 700);
+            Size = new Size(900, 640);
             StartPosition = FormStartPosition.CenterScreen;
             FormBorderStyle = FormBorderStyle.None;
-            BackColor = Color.FromArgb(15, 15, 35);
+            BackColor = Color.FromArgb(10, 10, 25);
             ForeColor = Color.White;
             WindowState = FormWindowState.Maximized;
             TopMost = true;
+            DoubleBuffered = true;
 
-            var mainPanel = new TableLayoutPanel
-            {
-                Dock = DockStyle.Fill,
-                Padding = new Padding(40),
-                BackColor = Color.FromArgb(15, 15, 35)
-            };
-            mainPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 45));
-            mainPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 55));
-
-            var leftPanel = new Panel { Dock = DockStyle.Fill };
-            var rightPanel = new Panel { Dock = DockStyle.Fill };
+            var bgPanel = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(10, 10, 25) };
 
             _logoBox = new PictureBox
             {
-                Size = new Size(140, 140),
-                Location = new Point(100, 60),
+                Size = new Size(100, 100),
+                Location = new Point((900 - 100) / 2, 25),
                 SizeMode = PictureBoxSizeMode.Zoom
             };
             LoadLogo();
 
-            _titleLabel = new Label
+            _appNameLabel = new Label
             {
                 Text = _config.DisplayName,
                 Font = new Font("Segoe UI", 26, FontStyle.Bold),
-                ForeColor = Color.FromArgb(124, 58, 237),
-                Location = new Point(100, 220),
-                AutoSize = true
+                ForeColor = Color.FromArgb(220, 220, 240),
+                TextAlign = ContentAlignment.MiddleCenter,
+                AutoSize = false,
+                Size = new Size(500, 45),
+                Location = new Point(200, 130)
             };
 
             _welcomeLabel = new Label
             {
                 Text = _config.WelcomeMessage,
-                Font = new Font("Segoe UI", 14),
-                ForeColor = Color.FromArgb(167, 139, 250),
-                Location = new Point(100, 280),
-                AutoSize = true
+                Font = new Font("Segoe UI", 12),
+                ForeColor = Color.FromArgb(150, 150, 175),
+                TextAlign = ContentAlignment.MiddleCenter,
+                AutoSize = false,
+                Size = new Size(500, 25),
+                Location = new Point(200, 175)
             };
 
-            _timeInfoLabel = new Label
+            var tabPanel = new Panel
             {
-                Font = new Font("Segoe UI", 11),
-                ForeColor = Color.FromArgb(200, 200, 200),
-                Location = new Point(100, 320),
-                AutoSize = true,
-                MaximumSize = new Size(300, 200)
+                Size = new Size(340, 44),
+                Location = new Point(280, 220),
+                BackColor = Color.FromArgb(22, 22, 45)
             };
+            var tabRadius = 10;
+            using (var path = GetRoundRect(0, 0, 340, 44, tabRadius))
+            {
+                tabPanel.Region = new Region(path);
+            }
 
-            leftPanel.Controls.AddRange(new Control[] { _logoBox, _titleLabel, _welcomeLabel, _timeInfoLabel });
-
-            var lblUser = new Label
+            _userModeBtn = new ToggleButton
             {
                 Text = "Usuário",
+                Size = new Size(168, 40),
+                Location = new Point(1, 2),
                 Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                ForeColor = Color.FromArgb(200, 200, 220),
-                Location = new Point(30, 60),
+                Selected = true
+            };
+            _userModeBtn.OnToggle += () => SwitchToUserMode();
+
+            _adminModeBtn = new ToggleButton
+            {
+                Text = "Administrador",
+                Size = new Size(168, 40),
+                Location = new Point(171, 2),
+                Font = new Font("Segoe UI", 12, FontStyle.Bold),
+                Selected = false
+            };
+            _adminModeBtn.OnToggle += () => SwitchToAdminMode();
+
+            tabPanel.Controls.Add(_userModeBtn);
+            tabPanel.Controls.Add(_adminModeBtn);
+
+            _cardPanel = new Panel
+            {
+                Size = new Size(420, 340),
+                Location = new Point(240, 280),
+                BackColor = Color.FromArgb(18, 18, 40)
+            };
+            using (var path = GetRoundRect(0, 0, 420, 340, 16))
+            {
+                _cardPanel.Region = new Region(path);
+            }
+
+            _cardTitle = new Label
+            {
+                Font = new Font("Segoe UI", 15, FontStyle.Bold),
+                ForeColor = Color.White,
+                Location = new Point(30, 20),
                 AutoSize = true
             };
+            _cardSubtitle = new Label
+            {
+                Font = new Font("Segoe UI", 10),
+                ForeColor = Color.FromArgb(140, 140, 160),
+                Location = new Point(30, 48),
+                AutoSize = true
+            };
+            _cardPanel.Controls.Add(_cardTitle);
+            _cardPanel.Controls.Add(_cardSubtitle);
 
+            BuildUserPanel();
+            BuildAdminPanel();
+            _cardPanel.Controls.Add(_userPanel);
+            _cardPanel.Controls.Add(_adminPanel);
+
+            var closeLabel = new Label
+            {
+                Text = "✕",
+                Font = new Font("Segoe UI", 16),
+                ForeColor = Color.FromArgb(150, 150, 170),
+                Location = new Point(870, 10),
+                AutoSize = true,
+                Cursor = Cursors.Hand
+            };
+            closeLabel.Click += (s, e) => Application.Exit();
+
+            bgPanel.Controls.AddRange(new Control[] { _logoBox, _appNameLabel, _welcomeLabel, tabPanel, _cardPanel, closeLabel });
+            Controls.Add(bgPanel);
+        }
+
+        private void BuildUserPanel()
+        {
+            _userPanel = new Panel { Size = new Size(420, 340), Location = new Point(0, 0), BackColor = Color.Transparent };
+
+            var lblUser = new Label { Text = "Selecionar Usuário", Font = new Font("Segoe UI", 10, FontStyle.Bold), ForeColor = Color.FromArgb(180, 180, 200), Location = new Point(30, 80), AutoSize = true };
             _userCombo = new ComboBox
             {
-                Location = new Point(30, 90),
-                Size = new Size(320, 35),
+                Location = new Point(30, 104),
+                Size = new Size(360, 36),
                 Font = new Font("Segoe UI", 13),
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(26, 26, 46),
+                BackColor = Color.FromArgb(30, 30, 55),
                 ForeColor = Color.White
             };
             _userCombo.SelectedIndexChanged += UserCombo_SelectedIndexChanged;
 
-            var lblPin = new Label
-            {
-                Text = "PIN",
-                Font = new Font("Segoe UI", 12, FontStyle.Bold),
-                ForeColor = Color.FromArgb(200, 200, 220),
-                Location = new Point(30, 145),
-                AutoSize = true
-            };
-
+            var lblPin = new Label { Text = "PIN de Acesso", Font = new Font("Segoe UI", 10, FontStyle.Bold), ForeColor = Color.FromArgb(180, 180, 200), Location = new Point(30, 155), AutoSize = true };
             _pinBox = new TextBox
             {
-                Location = new Point(30, 175),
-                Size = new Size(320, 35),
-                Font = new Font("Segoe UI", 14),
+                Location = new Point(30, 179),
+                Size = new Size(200, 36),
+                Font = new Font("Segoe UI", 16),
                 PasswordChar = '●',
                 TextAlign = HorizontalAlignment.Center,
                 MaxLength = 8,
-                BackColor = Color.FromArgb(26, 26, 46),
+                BackColor = Color.FromArgb(30, 30, 55),
                 ForeColor = Color.White,
                 BorderStyle = BorderStyle.FixedSingle
             };
-            _pinBox.KeyDown += PinBox_KeyDown;
+            _pinBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) DoUserLogin(); };
 
-            _loginButton = new Button
+            _userLoginBtn = new Button
             {
-                Text = "Entrar",
-                Location = new Point(30, 230),
-                Size = new Size(320, 45),
-                Font = new Font("Segoe UI", 13, FontStyle.Bold),
-                BackColor = Color.FromArgb(124, 58, 237),
+                Text = "ENTRAR",
+                Location = new Point(245, 179),
+                Size = new Size(145, 36),
+                Font = new Font("Segoe UI", 12, FontStyle.Bold),
+                BackColor = Color.FromArgb(108, 50, 210),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat,
                 Cursor = Cursors.Hand
             };
-            _loginButton.FlatAppearance.BorderSize = 0;
-            _loginButton.Click += LoginButton_Click;
+            _userLoginBtn.FlatAppearance.BorderSize = 0;
+            _userLoginBtn.Click += (s, e) => DoUserLogin();
 
-            _photoBox = new PictureBox
-            {
-                Location = new Point(120, 310),
-                Size = new Size(120, 120),
-                SizeMode = PictureBoxSizeMode.Zoom,
-                BorderStyle = BorderStyle.FixedSingle,
-                BackColor = Color.FromArgb(26, 26, 46)
-            };
-
-            _pinPad = new TableLayoutPanel
-            {
-                Location = new Point(30, 450),
-                Size = new Size(320, 200),
-                ColumnCount = 3,
-                RowCount = 4,
-                BackColor = Color.Transparent
-            };
+            _pinPad = new TableLayoutPanel { Location = new Point(30, 228), Size = new Size(360, 100), ColumnCount = 3, RowCount = 4, BackColor = Color.Transparent };
             for (int i = 0; i < 3; i++) _pinPad.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33f));
             for (int i = 0; i < 4; i++) _pinPad.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
             BuildPinPad();
 
-            _adminButton = new Button
+            _photoBox = new PictureBox { Location = new Point(315, 10), Size = new Size(75, 75), SizeMode = PictureBoxSizeMode.Zoom, BackColor = Color.FromArgb(30, 30, 55) };
+            using (var path = GetRoundRect(0, 0, 75, 75, 37))
             {
-                Text = "⚙",
-                Font = new Font("Segoe UI", 16),
-                Size = new Size(45, 45),
-                Location = new Point(310, 670),
-                BackColor = Color.FromArgb(26, 26, 46),
-                ForeColor = Color.FromArgb(150, 150, 170),
-                FlatStyle = FlatStyle.Flat,
-                Cursor = Cursors.Hand,
-                Anchor = AnchorStyles.Bottom | AnchorStyles.Right
+                _photoBox.Region = new Region(path);
+            }
+
+            _timeInfoLabel = new Label { Font = new Font("Segoe UI", 9), ForeColor = Color.FromArgb(130, 130, 160), Location = new Point(10, 10), AutoSize = true, MaximumSize = new Size(220, 60) };
+
+            _userPanel.Controls.AddRange(new Control[] { lblUser, _userCombo, lblPin, _pinBox, _userLoginBtn, _pinPad, _photoBox, _timeInfoLabel });
+        }
+
+        private void BuildAdminPanel()
+        {
+            _adminPanel = new Panel { Size = new Size(420, 340), Location = new Point(0, 0), BackColor = Color.Transparent, Visible = false };
+
+            var lblAdminInfo = new Label
+            {
+                Text = "Acesso restrito a administradores do sistema",
+                Font = new Font("Segoe UI", 10),
+                ForeColor = Color.FromArgb(140, 140, 170),
+                Location = new Point(30, 70),
+                AutoSize = true
             };
-            _adminButton.FlatAppearance.BorderSize = 0;
-            _adminButton.Click += AdminButton_Click;
 
-            rightPanel.Controls.AddRange(new Control[] { lblUser, _userCombo, lblPin, _pinBox, _loginButton, _photoBox, _pinPad, _adminButton });
+            var lblUsername = new Label { Text = "Usuário", Font = new Font("Segoe UI", 10, FontStyle.Bold), ForeColor = Color.FromArgb(180, 180, 200), Location = new Point(30, 110), AutoSize = true };
+            _adminUsernameBox = new TextBox
+            {
+                Text = "admin",
+                Location = new Point(30, 134),
+                Size = new Size(360, 36),
+                Font = new Font("Segoe UI", 13),
+                BackColor = Color.FromArgb(30, 30, 55),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
 
-            mainPanel.Controls.Add(leftPanel, 0, 0);
-            mainPanel.Controls.Add(rightPanel, 1, 0);
-            Controls.Add(mainPanel);
+            var lblPassword = new Label { Text = "Senha", Font = new Font("Segoe UI", 10, FontStyle.Bold), ForeColor = Color.FromArgb(180, 180, 200), Location = new Point(30, 185), AutoSize = true };
+            _adminPasswordBox = new TextBox
+            {
+                Location = new Point(30, 209),
+                Size = new Size(360, 36),
+                Font = new Font("Segoe UI", 13),
+                PasswordChar = '●',
+                BackColor = Color.FromArgb(30, 30, 55),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            _adminPasswordBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) DoAdminLogin(); };
+
+            _adminLoginBtn = new Button
+            {
+                Text = "ACESSAR PAINEL DE ADMINISTRAÇÃO",
+                Location = new Point(30, 270),
+                Size = new Size(360, 42),
+                Font = new Font("Segoe UI", 11, FontStyle.Bold),
+                BackColor = Color.FromArgb(108, 50, 210),
+                ForeColor = Color.White,
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            _adminLoginBtn.FlatAppearance.BorderSize = 0;
+            _adminLoginBtn.Click += (s, e) => DoAdminLogin();
+
+            _adminPanel.Controls.AddRange(new Control[] { lblAdminInfo, lblUsername, _adminUsernameBox, lblPassword, _adminPasswordBox, _adminLoginBtn });
+        }
+
+        private GraphicsPath GetRoundRect(int x, int y, int w, int h, int r)
+        {
+            var path = new GraphicsPath();
+            path.AddArc(x, y, r * 2, r * 2, 180, 90);
+            path.AddArc(x + w - r * 2, y, r * 2, r * 2, 270, 90);
+            path.AddArc(x + w - r * 2, y + h - r * 2, r * 2, r * 2, 0, 90);
+            path.AddArc(x, y + h - r * 2, r * 2, r * 2, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        private void SwitchToUserMode()
+        {
+            _isAdminMode = false;
+            _userModeBtn.Selected = true;
+            _adminModeBtn.Selected = false;
+            _userPanel.Visible = true;
+            _adminPanel.Visible = false;
+            _cardTitle.Text = "Acesso do Usuário";
+            _cardSubtitle.Text = "Selecione seu nome e digite seu PIN";
+            _pinBox.Clear();
+        }
+
+        private void SwitchToAdminMode()
+        {
+            _isAdminMode = true;
+            _userModeBtn.Selected = false;
+            _adminModeBtn.Selected = true;
+            _userPanel.Visible = false;
+            _adminPanel.Visible = true;
+            _cardTitle.Text = "Administração";
+            _cardSubtitle.Text = "Digite suas credenciais de administrador";
+            _adminPasswordBox.Clear();
+            _adminPasswordBox.Focus();
         }
 
         private void BuildPinPad()
@@ -211,7 +343,7 @@ namespace ApacKiosk.Forms
                     Font = new Font("Segoe UI", 14, FontStyle.Bold),
                     Dock = DockStyle.Fill,
                     Margin = new Padding(4),
-                    BackColor = d == "OK" ? Color.FromArgb(124, 58, 237) : Color.FromArgb(42, 42, 70),
+                    BackColor = d == "OK" ? Color.FromArgb(108, 50, 210) : Color.FromArgb(42, 42, 70),
                     ForeColor = Color.White,
                     FlatStyle = FlatStyle.Flat,
                     Cursor = Cursors.Hand
@@ -221,17 +353,10 @@ namespace ApacKiosk.Forms
                 {
                     if (d == "⌫")
                     {
-                        if (_pinBox.Text.Length > 0)
-                            _pinBox.Text = _pinBox.Text.Substring(0, _pinBox.Text.Length - 1);
+                        if (_pinBox.Text.Length > 0) _pinBox.Text = _pinBox.Text.Substring(0, _pinBox.Text.Length - 1);
                     }
-                    else if (d == "OK")
-                    {
-                        DoLogin();
-                    }
-                    else
-                    {
-                        _pinBox.Text += d;
-                    }
+                    else if (d == "OK") DoUserLogin();
+                    else _pinBox.Text += d;
                 };
                 _pinPad.Controls.Add(btn);
             }
@@ -239,30 +364,41 @@ namespace ApacKiosk.Forms
 
         private void LoadLogo()
         {
-            var logoPath = _config.LogoPath;
-            if (!string.IsNullOrEmpty(logoPath) && File.Exists(logoPath))
+            _logoBox.Image = null;
+            string[] paths = {
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "LogoApac.png"),
+                Path.Combine(Application.StartupPath, "Resources", "LogoApac.png"),
+            };
+
+            foreach (var p in paths)
             {
-                try { _logoBox.Image = Image.FromFile(logoPath); return; } catch { }
+                if (File.Exists(p))
+                {
+                    try { _logoBox.Image = Image.FromFile(p); return; } catch { }
+                }
             }
-            try
+
+            var configPath = _config.LogoPath;
+            if (!string.IsNullOrEmpty(configPath) && File.Exists(configPath))
             {
-                _logoBox.Image = CreateDefaultLogo();
+                try { _logoBox.Image = Image.FromFile(configPath); return; } catch { }
             }
-            catch { }
+
+            try { _logoBox.Image = CreateDefaultLogo(); } catch { }
         }
 
         private Bitmap CreateDefaultLogo()
         {
-            var bmp = new Bitmap(140, 140);
+            var bmp = new Bitmap(100, 100);
             using (var g = Graphics.FromImage(bmp))
             {
-                g.Clear(Color.FromArgb(15, 15, 35));
-                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.Clear(Color.FromArgb(10, 10, 25));
+                g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (var brush = new SolidBrush(Color.FromArgb(124, 58, 237)))
-                using (var font = new Font("Segoe UI", 48, FontStyle.Bold))
+                using (var font = new Font("Segoe UI", 36, FontStyle.Bold))
                 {
                     var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-                    g.DrawString("APAC", font, brush, new RectangleF(0, 0, 140, 140), sf);
+                    g.DrawString("APAC", font, brush, new RectangleF(0, 0, 100, 100), sf);
                 }
             }
             return bmp;
@@ -301,117 +437,48 @@ namespace ApacKiosk.Forms
                 {
                     try { _photoBox.Image = Image.FromFile(user.PhotoPath); } catch { }
                 }
-
-                var timeInfo = CheckUserTimeAllowed(user);
-                _timeInfoLabel.Text = timeInfo;
-
-                if (_isAdminMode)
-                {
-                    _isAdminMode = false;
-                }
+                _timeInfoLabel.Text = CheckUserTimeAllowed(user);
+                _pinBox.Focus();
             }
         }
 
         private string CheckUserTimeAllowed(UserListItem user)
         {
-            if (!user.ProfileId.HasValue)
-                return "";
-
+            if (!user.ProfileId.HasValue) return "";
             using var conn = _db.GetConnection();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = @"SELECT day_of_week, start_time, end_time FROM time_rules WHERE profile_id = @pid";
+            cmd.CommandText = "SELECT day_of_week, start_time, end_time FROM time_rules WHERE profile_id = @pid";
             cmd.Parameters.AddWithValue("@pid", user.ProfileId.Value);
             using var reader = cmd.ExecuteReader();
             var dt = new DataTable();
             dt.Load(reader);
-
-            if (dt.Rows.Count == 0)
-                return "";
+            if (dt.Rows.Count == 0) return "";
 
             var now = DateTime.Now;
-            var currentDay = ((int)now.DayOfWeek) % 7; // 0=Sunday, ... 6=Saturday
-            if (currentDay == 0) currentDay = 7; // Convert to 1=Monday...7=Sunday format
+            var currentDay = ((int)now.DayOfWeek == 0) ? 7 : (int)now.DayOfWeek;
 
             foreach (DataRow row in dt.Rows)
             {
-                var dayOfWeek = Convert.ToInt32(row["day_of_week"]);
-                if (dayOfWeek != currentDay) continue;
-
-                var startStr = row["start_time"].ToString();
-                var endStr = row["end_time"].ToString();
-
-                if (TimeSpan.TryParse(startStr, out var start) &&
-                    TimeSpan.TryParse(endStr, out var end))
+                if (Convert.ToInt32(row["day_of_week"]) != currentDay) continue;
+                if (TimeSpan.TryParse(row["start_time"].ToString(), out var start) &&
+                    TimeSpan.TryParse(row["end_time"].ToString(), out var end))
                 {
                     if (now.TimeOfDay >= start && now.TimeOfDay <= end)
-                        return $"Horário permitido: {start:h\\:mm} – {end:h\\:mm} ✓";
-
+                        return $"Disponível até {end:h\\:mm} ✓";
                     if (now.TimeOfDay < start)
-                        return $"Próximo horário disponível: hoje às {start:h\\:mm}";
+                        return $"Disponível a partir das {start:h\\:mm}";
                 }
             }
-
-            var next = GetNextAvailableTime(currentDay, dt);
-            return next ?? "Fora do horário permitido";
+            return "Fora do horário permitido";
         }
 
-        private string GetNextAvailableTime(int currentDay, DataTable rules)
+        private void DoUserLogin()
         {
-            if (rules.Rows.Count == 0) return null;
-
-            var now = DateTime.Now;
-            for (int offset = 0; offset < 7; offset++)
-            {
-                var checkDay = ((currentDay + offset) % 7);
-                if (checkDay == 0) checkDay = 7;
-                foreach (DataRow row in rules.Rows)
-                {
-                    var dayOfWeek = Convert.ToInt32(row["day_of_week"]);
-                    if (dayOfWeek != checkDay) continue;
-                    if (TimeSpan.TryParse(row["start_time"].ToString(), out var start))
-                    {
-                        if (offset == 0 && now.TimeOfDay >= start) continue;
-                        var dayName = checkDay switch
-                        {
-                            1 => "segunda", 2 => "terça", 3 => "quarta", 4 => "quinta",
-                            5 => "sexta", 6 => "sábado", 7 => "domingo", _ => ""
-                        };
-                        if (offset == 0)
-                            return $"Próximo horário: hoje às {start:h\\:mm}";
-                        if (offset == 1)
-                            return $"Próximo horário: amanhã ({dayName}) às {start:h\\:mm}";
-                        return $"Próximo horário: {dayName} às {start:h\\:mm}";
-                    }
-                }
-            }
-            return "Sem horários disponíveis";
-        }
-
-        private void PinBox_KeyDown(object sender, KeyEventArgs e)
-        {
-            if (e.KeyCode == Keys.Enter)
-                DoLogin();
-        }
-
-        private void LoginButton_Click(object sender, EventArgs e)
-        {
-            DoLogin();
-        }
-
-        private void DoLogin()
-        {
-            if (_isAdminMode)
-            {
-                VerifyAdminPassword();
-                return;
-            }
-
             if (!(_userCombo.SelectedItem is UserListItem user))
             {
                 MessageBox.Show("Selecione um usuário.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-
             if (string.IsNullOrWhiteSpace(_pinBox.Text))
             {
                 MessageBox.Show("Digite o PIN.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -431,43 +498,41 @@ namespace ApacKiosk.Forms
                 return;
             }
 
-            _db.InsertLog(user.Id, "login", null, $"Login do usuário: {user.FullName}");
+            _db.InsertLog(user.Id, "login", null, $"Login: {user.FullName}");
 
             LoggedInUser = new Models.User
             {
-                Id = user.Id,
-                FullName = user.FullName,
-                Username = user.Username,
-                PhotoPath = user.PhotoPath,
-                ProfileId = user.ProfileId,
-                IsActive = user.IsActive
+                Id = user.Id, FullName = user.FullName, Username = user.Username,
+                PhotoPath = user.PhotoPath, ProfileId = user.ProfileId, IsActive = user.IsActive
             };
-
             DialogResult = DialogResult.OK;
             Close();
         }
 
-        private void VerifyAdminPassword()
+        private void DoAdminLogin()
         {
-            var pin = _pinBox.Text;
-            if (string.IsNullOrWhiteSpace(pin))
+            var username = _adminUsernameBox.Text.Trim();
+            var password = _adminPasswordBox.Text;
+
+            if (string.IsNullOrWhiteSpace(password))
             {
-                MessageBox.Show("Digite a senha de administrador.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("Digite a senha.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             using var conn = _db.GetConnection();
             var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT password_hash FROM admins WHERE username = 'admin'";
+            cmd.CommandText = "SELECT password_hash FROM admins WHERE username = @u";
+            cmd.Parameters.AddWithValue("@u", username);
             var hash = cmd.ExecuteScalar()?.ToString();
 
-            if (hash != null && PasswordHash.VerifyPassword(pin, hash))
+            if (hash != null && PasswordHash.VerifyPassword(password, hash))
             {
-                _db.InsertLog(null, "admin_login", null, "Login de administrador");
+                _db.InsertLog(null, "admin_login", null, $"Login admin: {username}");
 
                 if (PasswordHash.VerifyPassword("APAC@Admin2024", hash))
                 {
-                    MessageBox.Show("ATENÇÃO: A senha de administrador ainda é a padrão.\nAltere-a no Painel de Administração > Configurações do Sistema.",
+                    MessageBox.Show("ATENÇÃO: A senha de administrador ainda é a padrão.\nAltere-a no Painel Admin > Configurações do Sistema.",
                         "Alerta de Segurança", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
 
@@ -477,30 +542,37 @@ namespace ApacKiosk.Forms
             }
             else
             {
-                MessageBox.Show("Senha de administrador inválida.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
-                _pinBox.Clear();
+                MessageBox.Show("Usuário ou senha inválidos.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                _adminPasswordBox.Clear();
+                _adminPasswordBox.Focus();
             }
         }
 
-        private void AdminButton_Click(object sender, EventArgs e)
+        private class ToggleButton : Button
         {
-            _isAdminMode = true;
-            _pinBox.Clear();
-            _pinBox.PasswordChar = '●';
-            _userCombo.Enabled = false;
-
-            var result = MessageBox.Show("Modo Administrador — digite a senha no campo PIN e pressione Enter.",
-                "Admin", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
-            if (result == DialogResult.Cancel)
+            private bool _selected;
+            public bool Selected
             {
-                _isAdminMode = false;
-                _userCombo.Enabled = true;
+                get => _selected;
+                set { _selected = value; UpdateStyle(); }
             }
-        }
 
-        public new void Show()
-        {
-            base.Show();
+            public event Action OnToggle;
+
+            public ToggleButton()
+            {
+                FlatStyle = FlatStyle.Flat;
+                FlatAppearance.BorderSize = 0;
+                Cursor = Cursors.Hand;
+                Click += (s, e) => { Selected = true; OnToggle?.Invoke(); };
+                UpdateStyle();
+            }
+
+            private void UpdateStyle()
+            {
+                BackColor = _selected ? Color.FromArgb(108, 50, 210) : Color.FromArgb(22, 22, 45);
+                ForeColor = _selected ? Color.White : Color.FromArgb(160, 160, 180);
+            }
         }
 
         private class UserListItem

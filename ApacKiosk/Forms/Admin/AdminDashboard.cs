@@ -207,10 +207,87 @@ namespace ApacKiosk.Forms.Admin
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            var result = MessageBox.Show("Deseja realmente fechar o Painel de Administração?",
-                _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (result == DialogResult.No)
+            var pwdPrompt = new Form
+            {
+                Text = "Confirmação para Fechar",
+                Size = new Size(400, 200),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                BackColor = Color.FromArgb(22, 22, 45),
+                TopMost = true
+            };
+
+            var lbl = new Label
+            {
+                Text = "Digite a senha de administrador para fechar:",
+                Font = new Font("Segoe UI", 11),
+                ForeColor = Color.White,
+                Location = new Point(20, 20),
+                AutoSize = true
+            };
+
+            var txt = new TextBox
+            {
+                Location = new Point(20, 60),
+                Size = new Size(340, 30),
+                PasswordChar = '\u25CF',
+                Font = new Font("Segoe UI", 12),
+                BackColor = Color.FromArgb(26, 26, 46),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            var btnOk = new Button
+            {
+                Text = "Fechar",
+                Location = new Point(150, 110),
+                Size = new Size(100, 35),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(200, 50, 50),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand
+            };
+            btnOk.FlatAppearance.BorderSize = 0;
+
+            var btnCancel = new Button
+            {
+                Text = "Cancelar",
+                Location = new Point(260, 110),
+                Size = new Size(100, 35),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(42, 42, 70),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand,
+                DialogResult = DialogResult.Cancel
+            };
+            btnCancel.FlatAppearance.BorderSize = 0;
+
+            btnOk.Click += (s, args) =>
+            {
+                using var conn = _db.GetConnection();
+                var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT password_hash FROM admins WHERE username = 'admin'";
+                var hash = cmd.ExecuteScalar()?.ToString();
+                if (hash != null && BCrypt.Net.BCrypt.Verify(txt.Text, hash))
+                {
+                    pwdPrompt.DialogResult = DialogResult.OK;
+                    pwdPrompt.Close();
+                }
+                else
+                {
+                    MessageBox.Show("Senha inválida.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            };
+
+            pwdPrompt.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
+            pwdPrompt.AcceptButton = btnOk;
+            pwdPrompt.CancelButton = btnCancel;
+
+            if (pwdPrompt.ShowDialog() != DialogResult.OK)
+            {
                 e.Cancel = true;
+            }
+
             base.OnFormClosing(e);
         }
     }

@@ -1,7 +1,9 @@
 using System;
 using System.IO;
+using System.Windows.Forms;
 using ApacKiosk.Forms;
 using ApacKiosk.Forms.Admin;
+using Microsoft.Win32;
 
 namespace ApacKiosk;
 
@@ -26,6 +28,8 @@ static class Program
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "ApacKiosk", "apac.db");
 
+        EnsureDataDirectory(dbPath);
+
         Db = new Database.DatabaseManager(dbPath);
         Db.Initialize();
 
@@ -41,6 +45,8 @@ static class Program
         Monitor = new Services.MonitorService(screenCapture, cameraCapture, keyLogger);
         Security = new Services.SecurityManager(Db);
 
+        SetupAutostart();
+
         using var loginForm = new LoginForm(Db, Config);
         if (loginForm.ShowDialog() == DialogResult.OK)
         {
@@ -53,5 +59,34 @@ static class Program
                 Application.Run(new KioskBrowserForm(Db, Config, Monitor, Security, loginForm.LoggedInUser));
             }
         }
+    }
+
+    private static void EnsureDataDirectory(string dbPath)
+    {
+        var dir = Path.GetDirectoryName(dbPath);
+        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+            Directory.CreateDirectory(dir);
+    }
+
+    private static void SetupAutostart()
+    {
+        try
+        {
+            using var key = Registry.LocalMachine.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
+
+            if (key == null) return;
+
+            if (Config.AutostartEnabled)
+            {
+                var exePath = Application.ExecutablePath;
+                key.SetValue("ApacKioskGuardian", exePath);
+            }
+            else
+            {
+                try { key.DeleteValue("ApacKioskGuardian", false); } catch { }
+            }
+        }
+        catch { }
     }
 }
