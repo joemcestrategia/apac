@@ -8,7 +8,6 @@
     <Nullable>enable</Nullable>
     <AssemblyName>ApacKiosk</AssemblyName>
     <RootNamespace>ApacKiosk</RootNamespace>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,17 +17,6 @@
     <PackageReference Include="AForge.Video" Version="2.2.5" />
     <PackageReference Include="AForge.Video.DirectShow" Version="2.2.5" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Compile Remove="ApacKiosk\**" />
-    <Compile Remove="Database\DatabaseService.cs" />
-    <Compile Remove="Forms\MainKioskForm.cs" />
-    <Compile Remove="Monitoring\ScreenCaptureService.cs" />
-    <Compile Remove="Security\HotkeyBlocker.cs" />
-    <Compile Remove="Security\KioskProtection.cs" />
-    <None Remove="ApacKiosk\**" />
-    <EmbeddedResource Remove="ApacKiosk\**" />
   </ItemGroup>
 
   <ItemGroup>
