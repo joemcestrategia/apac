@@ -1,0 +1,2 @@
+pyautogen>=0.2.0
+autogen-ext[openai]>=0.7.0
