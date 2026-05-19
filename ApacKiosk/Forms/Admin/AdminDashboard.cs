@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Windows.Forms;
 using ApacKiosk.Database;
 using ApacKiosk.Utils;
@@ -23,6 +24,7 @@ namespace ApacKiosk.Forms.Admin
             ("Usuários", "👥"),
             ("Perfis de Acesso", "🔐"),
             ("Sites Permitidos", "🌐"),
+            ("Programas", "🖥"),
             ("Monitoramento", "📸"),
             ("Sistema", "⚙"),
             ("Logs", "📋"),
@@ -56,12 +58,20 @@ namespace ApacKiosk.Forms.Admin
                 Padding = new Padding(0)
             };
 
+            var logoBox = new PictureBox
+            {
+                Size = new Size(60, 60),
+                Location = new Point(90, 15),
+                SizeMode = PictureBoxSizeMode.Zoom
+            };
+            LoadAdminLogo(logoBox);
+
             var logoLabel = new Label
             {
                 Text = "APAC Kiosk\nGuardian",
                 Font = new Font("Segoe UI", 16, FontStyle.Bold),
                 ForeColor = Color.FromArgb(124, 58, 237),
-                Location = new Point(20, 20),
+                Location = new Point(20, 80),
                 Size = new Size(200, 50),
                 TextAlign = ContentAlignment.MiddleLeft
             };
@@ -71,7 +81,7 @@ namespace ApacKiosk.Forms.Admin
                 Text = "v1.0 — Administração",
                 Font = new Font("Segoe UI", 9),
                 ForeColor = Color.FromArgb(120, 120, 140),
-                Location = new Point(20, 70),
+                Location = new Point(20, 130),
                 AutoSize = true
             };
 
@@ -79,12 +89,12 @@ namespace ApacKiosk.Forms.Admin
             {
                 Height = 2,
                 Width = 200,
-                Location = new Point(20, 100),
+                Location = new Point(20, 160),
                 BackColor = Color.FromArgb(50, 50, 80)
             };
 
             _navButtons = new Button[Tabs.Length];
-            var y = 120;
+            var y = 180;
             for (int i = 0; i < Tabs.Length; i++)
             {
                 var btn = new Button
@@ -123,7 +133,7 @@ namespace ApacKiosk.Forms.Admin
             closeBtn.FlatAppearance.BorderSize = 0;
             closeBtn.Click += (s, e) => Close();
 
-            _sidebarPanel.Controls.AddRange(new Control[] { logoLabel, versionLabel, separator, closeBtn });
+            _sidebarPanel.Controls.AddRange(new Control[] { logoBox, logoLabel, versionLabel, separator, closeBtn });
 
             _contentPanel = new Panel
             {
@@ -172,9 +182,10 @@ namespace ApacKiosk.Forms.Admin
                 1 => new UserManagementTab(_db, _config),
                 2 => new AccessProfilesTab(_db, _config),
                 3 => new AllowedSitesTab(_db, _config),
-                4 => new MonitoringConfigTab(_db, _config),
-                5 => new SystemConfigTab(_db, _config),
-                6 => new LogViewerTab(_db, _config),
+                4 => new ProgramsTab(_db, _config),
+                5 => new MonitoringConfigTab(_db, _config),
+                6 => new SystemConfigTab(_db, _config),
+                7 => new LogViewerTab(_db, _config),
                 _ => null
             };
 
@@ -202,6 +213,21 @@ namespace ApacKiosk.Forms.Admin
                     "ATENÇÃO: A senha de administrador ainda é a padrão (APAC@Admin2024).\n\n" +
                     "Altere-a imediatamente em Sistema > Configurações do Sistema.",
                     "Alerta de Segurança", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private static void LoadAdminLogo(PictureBox box)
+        {
+            var paths = new[] {
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources", "LogoApac.png"),
+                Path.Combine(Application.StartupPath, "Resources", "LogoApac.png"),
+            };
+            foreach (var p in paths)
+            {
+                if (File.Exists(p))
+                {
+                    try { box.Image = Image.FromFile(p); return; } catch { }
+                }
             }
         }
 

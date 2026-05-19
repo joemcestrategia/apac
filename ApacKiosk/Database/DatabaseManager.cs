@@ -109,12 +109,24 @@ namespace ApacKiosk.Database
                     last_detected DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
 
+                CREATE TABLE IF NOT EXISTS allowed_programs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER REFERENCES access_profiles(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    executable_path TEXT NOT NULL,
+                    arguments TEXT,
+                    icon_path TEXT,
+                    is_global INTEGER DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_log_entries_timestamp ON log_entries(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_log_entries_type ON log_entries(type);
                 CREATE INDEX IF NOT EXISTS idx_log_entries_user ON log_entries(user_id);
                 CREATE INDEX IF NOT EXISTS idx_session_logs_user ON session_logs(user_id);
                 CREATE INDEX IF NOT EXISTS idx_time_rules_profile ON time_rules(profile_id);
                 CREATE INDEX IF NOT EXISTS idx_allowed_sites_profile ON allowed_sites(profile_id);
+                CREATE INDEX IF NOT EXISTS idx_allowed_programs_profile ON allowed_programs(profile_id);
             ";
             cmd.ExecuteNonQuery();
 

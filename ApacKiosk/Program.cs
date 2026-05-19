@@ -45,6 +45,9 @@ static class Program
         Monitor = new Services.MonitorService(screenCapture, cameraCapture, keyLogger);
         Security = new Services.SecurityManager(Db);
 
+        var programService = new Services.ProgramService(Db);
+        programService.SeedDefaults();
+
         SetupAutostart();
 
         using var loginForm = new LoginForm(Db, Config);
@@ -56,7 +59,7 @@ static class Program
             }
             else if (loginForm.LoggedInUser != null)
             {
-                Application.Run(new KioskBrowserForm(Db, Config, Monitor, Security, loginForm.LoggedInUser));
+                Application.Run(new KioskDesktopForm(Db, Config, Monitor, Security, loginForm.LoggedInUser));
             }
         }
     }
