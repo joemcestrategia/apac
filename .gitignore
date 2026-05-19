@@ -33,5 +33,10 @@ venv/
 Thumbs.db
 nul
 
+# Misc
+Backup/
+UpgradeLog.htm
+LogoApac.png
+
 # Embedded repos
 Amazon/
