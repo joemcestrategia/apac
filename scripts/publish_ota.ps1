@@ -109,11 +109,11 @@ Write-Host "SHA-256: $sha256" -ForegroundColor Gray
 Write-Host ""
 Write-Host "[PROCESSO: 80%] Fazendo commit e tag Git..." -ForegroundColor Cyan
 git add ApacKiosk/
-git commit -m "chore(release): versao $nextVersion - $Changelog" -ErrorAction SilentlyContinue
-git push origin main -ErrorAction SilentlyContinue
+git commit -m "chore(release): versao $nextVersion - $Changelog"
+git push origin main
 
-git tag -a $tagName -m "Release $tagName" -ErrorAction SilentlyContinue
-git push origin $tagName -ErrorAction SilentlyContinue
+git tag -f -a $tagName -m "Release $tagName"
+git push origin $tagName --force
 
 # 7. Publicar Release no GitHub via CLI
 Write-Host ""

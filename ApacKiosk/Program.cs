@@ -1,10 +1,13 @@
 using System;
+using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Threading;
 using System.Windows.Forms;
 using ApacKiosk.Forms;
 using ApacKiosk.Forms.Admin;
+using ApacKiosk.Utils;
 using Microsoft.Win32;
-using System.Threading;
 
 namespace ApacKiosk;
 
@@ -28,6 +31,19 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        // 1. Tratar Desinstalação chamada pelo Painel de Controle
+        if (args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase) || a.Equals("/uninstall", StringComparison.OrdinalIgnoreCase)))
+        {
+            HandleUninstallBootstrap();
+            return;
+        }
+
+        if (args.Any(a => a.Equals("--uninstall-runner", StringComparison.OrdinalIgnoreCase)))
+        {
+            HandleUninstallExecution();
+            return;
+        }
+
         bool isNewInstance;
         _singleInstanceMutex = new Mutex(true, "Global\\APACKioskGuardian_SingleInstance", out isNewInstance);
         if (!isNewInstance)
@@ -65,6 +81,9 @@ static class Program
         Config = new Utils.ConfigManager(Db);
         License = new Services.LicenseManager(Config);
 
+        // Garantir registro no Painel de Controle do Windows
+        UninstallHelper.RegisterUninstall();
+
         bool silentInstall = false;
         string? silentSerial = null, silentState = null, silentCity = null, silentGender = null, silentEmail = null, silentName = null;
         foreach (var arg in args)
@@ -94,7 +113,7 @@ static class Program
                     silentGender ??= key.GetValue("Gender")?.ToString();
                     silentEmail ??= key.GetValue("Email")?.ToString();
                     silentName ??= key.GetValue("Name")?.ToString();
-                    
+
                     try { key.DeleteValue("SilentInstall", false); } catch { }
                 }
             }
@@ -104,7 +123,7 @@ static class Program
         if (!License.IsActivated())
         {
             Trace("Sistema não ativado e não está em período de avaliação válido.");
-            
+
             if (silentInstall && !string.IsNullOrEmpty(silentSerial))
             {
                 Trace($"Modo silencioso detectado, tentando ativar com serial {silentSerial}...");
@@ -126,17 +145,17 @@ static class Program
         {
             Trace("Primeira execução detectada. Solicitando senha de administrador.");
             bool authSuccess = false;
-            
-            using var dummyBg = new Form 
-            { 
-                TopMost = true, 
-                WindowState = FormWindowState.Maximized, 
-                FormBorderStyle = FormBorderStyle.None, 
+
+            using var dummyBg = new Form
+            {
+                TopMost = true,
+                WindowState = FormWindowState.Maximized,
+                FormBorderStyle = FormBorderStyle.None,
                 BackColor = Color.FromArgb(10, 10, 25),
                 ShowInTaskbar = false
             };
             dummyBg.Show();
-            
+
             while (!authSuccess)
             {
                 var (result, pwd) = KioskDialog.ShowPasswordPrompt(
@@ -170,6 +189,13 @@ static class Program
             dummyBg.Close();
         }
 
+        // Exibir SplashScreen e checar atualizações silenciosas na inicialização
+        Trace("Exibindo SplashScreen e verificando atualização na inicialização");
+        using (var splash = new SplashScreen())
+        {
+            splash.ShowDialog();
+        }
+
         LogService = new Services.LogService(Db);
         UserService = new Services.UserService(Db);
         ProfileService = new Services.ProfileService(Db);
@@ -197,10 +223,6 @@ static class Program
         programService.SeedDefaults();
 
         SetupAutostart();
-
-        Trace("Exibindo SplashScreen");
-        using var splash = new SplashScreen();
-        splash.ShowDialog();
 
         while (true)
         {
@@ -260,6 +282,78 @@ static class Program
         cloudSync?.Dispose();
         _singleInstanceMutex?.Dispose();
         Trace("Programa encerrado normalmente");
+    }
+
+    private static void HandleUninstallBootstrap()
+    {
+        try
+        {
+            string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? Application.ExecutablePath;
+            string tempDir = Path.Combine(Path.GetTempPath(), "ApacKioskSetup");
+            if (!Directory.Exists(tempDir)) Directory.CreateDirectory(tempDir);
+
+            string tempExe = Path.Combine(tempDir, "ApacKioskUninstall.exe");
+            File.Copy(currentExe, tempExe, true);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = tempExe,
+                Arguments = "--uninstall-runner",
+                WorkingDirectory = tempDir,
+                UseShellExecute = true
+            };
+            Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Falha ao iniciar o desinstalador:\n{ex.Message}", "APAC Kiosk Guardian", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static void HandleUninstallExecution()
+    {
+        ApplicationConfiguration.Initialize();
+        Application.SetHighDpiMode(HighDpiMode.SystemAware);
+
+        var dbPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "ApacKiosk", "apac.db");
+
+        if (!File.Exists(dbPath))
+        {
+            // Se o banco não existir, confirmação direta
+            var confirm = MessageBox.Show(
+                "O banco de dados do quiosque não foi localizado.\nDeseja remover o APAC Kiosk Guardian deste computador?",
+                "APAC Kiosk Guardian — Desinstalação",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+
+            if (confirm == DialogResult.Yes)
+            {
+                UninstallHelper.ExecuteFullUninstall(true);
+                MessageBox.Show("APAC Kiosk Guardian foi desinstalado com sucesso.", "Desinstalação Concluída", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            return;
+        }
+
+        var db = new Database.DatabaseManager(dbPath);
+        using var form = new UninstallConfirmForm(db);
+        if (form.ShowDialog() == DialogResult.OK)
+        {
+            try
+            {
+                UninstallHelper.ExecuteFullUninstall(form.PurgeData);
+                MessageBox.Show(
+                    "O APAC Kiosk Guardian foi desinstalado com sucesso deste computador.",
+                    "Desinstalação Concluída",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ocorreu um erro durante a desinstalação:\n{ex.Message}", "Erro", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
     }
 
     private static void EnsureDataDirectory(string dbPath)
