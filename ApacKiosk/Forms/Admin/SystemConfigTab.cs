@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Windows.Forms;
 using Microsoft.Win32;
 using ApacKiosk.Database;
+using ApacKiosk.Services;
 using ApacKiosk.Utils;
 
 namespace ApacKiosk.Forms.Admin
@@ -21,6 +22,9 @@ namespace ApacKiosk.Forms.Admin
         private PictureBox _logoPreview;
         private CheckBox _chkAutostart;
 
+        private TextBox _txtSerialKey;
+        private Button _btnChangeSerial;
+
         private TextBox _txtCurrentPassword;
         private TextBox _txtNewPassword;
         private TextBox _txtConfirmPassword;
@@ -29,6 +33,8 @@ namespace ApacKiosk.Forms.Admin
         private NumericUpDown _numEmergencyMinutes;
         private TextBox _txtEmergencyReason;
         private Button _btnEmergencyDisable;
+
+        private Button _btnCheckUpdate;
 
         private Button _btnSave;
 
@@ -52,6 +58,7 @@ namespace ApacKiosk.Forms.Admin
 
             _txtLogoPath = AddTextField("Caminho do Logo:", ref y);
             _txtLogoPath.ReadOnly = true;
+            _txtLogoPath.Size = new Size(190, 28);
             _btnBrowseLogo = new Button
             {
                 Text = "Procurar...", Location = new Point(550, y - 30), Size = new Size(100, 28),
@@ -62,7 +69,7 @@ namespace ApacKiosk.Forms.Admin
             _btnBrowseLogo.Click += (s, e) =>
             {
                 using var ofd = new OpenFileDialog { Filter = "Imagens|*.png;*.jpg;*.jpeg" };
-                if (ofd.ShowDialog() == DialogResult.OK)
+                if (ofd.ShowDialog(this.FindForm()) == DialogResult.OK)
                 {
                     _txtLogoPath.Text = ofd.FileName;
                     try { _logoPreview.Image = Image.FromFile(ofd.FileName); } catch { }
@@ -89,6 +96,26 @@ namespace ApacKiosk.Forms.Admin
             y += 10;
             var sep1 = new Panel { Location = new Point(0, y), Size = new Size(600, 2), BackColor = Color.FromArgb(50, 50, 80) };
             Controls.Add(sep1);
+            y += 20;
+
+            y = AddSectionLabel("🛡️ Licença e Ativação", y);
+            _txtSerialKey = AddTextField("Chave Serial:", ref y);
+            _txtSerialKey.ReadOnly = true;
+
+            _btnChangeSerial = new Button
+            {
+                Text = "Alterar Licença", Location = new Point(200, y + 5), Size = new Size(180, 38),
+                Font = new Font("Segoe UI", 11, FontStyle.Bold), FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand
+            };
+            _btnChangeSerial.FlatAppearance.BorderSize = 0;
+            _btnChangeSerial.Click += (s, e) => ChangeSerial();
+            Controls.Add(_btnChangeSerial);
+            y += 55;
+
+            y += 10;
+            var sepLicense = new Panel { Location = new Point(0, y), Size = new Size(600, 2), BackColor = Color.FromArgb(50, 50, 80) };
+            Controls.Add(sepLicense);
             y += 20;
 
             y = AddSectionLabel("🔑 Alterar Senha do Admin", y);
@@ -134,6 +161,33 @@ namespace ApacKiosk.Forms.Admin
             _btnEmergencyDisable.FlatAppearance.BorderSize = 0;
             _btnEmergencyDisable.Click += (s, e) => EmergencyDisable();
             Controls.Add(_btnEmergencyDisable);
+            y += 55;
+
+            y += 10;
+            var sepUpdate = new Panel { Location = new Point(0, y), Size = new Size(600, 2), BackColor = Color.FromArgb(50, 50, 80) };
+            Controls.Add(sepUpdate);
+            y += 20;
+
+            y = AddSectionLabel("🔄 Atualização do Sistema", y);
+            var currentVer = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "1.0.0";
+            var lblUpdateInfo = new Label
+            {
+                Text = $"Versão atual: v{currentVer}\nVerifica se há novas versões disponíveis na internet e atualiza mantendo todas as configurações.",
+                Font = new Font("Segoe UI", 10), ForeColor = Color.FromArgb(180, 180, 200),
+                Location = new Point(35, y), AutoSize = true
+            };
+            Controls.Add(lblUpdateInfo);
+            y += 45;
+
+            _btnCheckUpdate = new Button
+            {
+                Text = "Verificar e Atualizar Sistema", Location = new Point(200, y + 5), Size = new Size(280, 38),
+                Font = new Font("Segoe UI", 11, FontStyle.Bold), FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(16, 185, 129), ForeColor = Color.White, Cursor = Cursors.Hand
+            };
+            _btnCheckUpdate.FlatAppearance.BorderSize = 0;
+            _btnCheckUpdate.Click += (s, e) => CheckAndUpdateSystem();
+            Controls.Add(_btnCheckUpdate);
             y += 55;
 
             _btnSave = new Button
@@ -207,6 +261,7 @@ namespace ApacKiosk.Forms.Admin
         private void LoadSettings()
         {
             _txtDisplayName.Text = _config.DisplayName;
+            _txtSerialKey.Text = _config.LicenseSignature;
             _txtWelcomeMessage.Text = _config.WelcomeMessage;
             _txtLogoPath.Text = _config.LogoPath;
             if (!string.IsNullOrEmpty(_config.LogoPath) && File.Exists(_config.LogoPath))
@@ -227,7 +282,18 @@ namespace ApacKiosk.Forms.Admin
 
             _db.InsertLog(null, "event", null, "Configurações do sistema atualizadas");
 
-            MessageBox.Show("Configurações salvas com sucesso!", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            KioskDialog.ShowMessage("Configurações salvas com sucesso!", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
+        }
+
+        private void ChangeSerial()
+        {
+            var licenseManager = new ApacKiosk.Services.LicenseManager(_config);
+            using var actForm = new ActivationForm(licenseManager, _config);
+            if (actForm.ShowDialog(this.FindForm()) == DialogResult.OK)
+            {
+                _txtSerialKey.Text = _config.LicenseSignature;
+                _db.InsertLog(null, "event", null, "Chave serial atualizada");
+            }
         }
 
         private void UpdateAutostartRegistry(bool enable)
@@ -259,19 +325,19 @@ namespace ApacKiosk.Forms.Admin
 
             if (string.IsNullOrEmpty(current) || string.IsNullOrEmpty(newPass))
             {
-                MessageBox.Show("Preencha todos os campos.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("Preencha todos os campos.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
 
             if (newPass != confirm)
             {
-                MessageBox.Show("As senhas não coincidem.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("As senhas não coincidem.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
 
             if (newPass.Length < 6)
             {
-                MessageBox.Show("A senha deve ter pelo menos 6 caracteres.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("A senha deve ter pelo menos 6 caracteres.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
 
@@ -282,7 +348,7 @@ namespace ApacKiosk.Forms.Admin
 
             if (hash == null || !BCrypt.Net.BCrypt.Verify(current, hash))
             {
-                MessageBox.Show("Senha atual incorreta.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                KioskDialog.ShowMessage("Senha atual incorreta.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
                 return;
             }
 
@@ -298,7 +364,7 @@ namespace ApacKiosk.Forms.Admin
             _txtNewPassword.Clear();
             _txtConfirmPassword.Clear();
 
-            MessageBox.Show("Senha alterada com sucesso!", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            KioskDialog.ShowMessage("Senha alterada com sucesso!", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
         }
 
         private void EmergencyDisable()
@@ -306,11 +372,12 @@ namespace ApacKiosk.Forms.Admin
             var reason = _txtEmergencyReason.Text;
             if (string.IsNullOrWhiteSpace(reason))
             {
-                MessageBox.Show("Informe a justificativa para desativação de emergência.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("Informe a justificativa para desativação de emergência.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
 
-            var pwdText = Microsoft.VisualBasic.Interaction.InputBox("Digite a senha de administrador:", "Confirmação de Emergência", "");
+            var pwdText = KioskDialog.ShowInput("Digite a senha de administrador:", "Confirmação de Emergência", "", true, this);
+            if (string.IsNullOrEmpty(pwdText)) return;
             using var conn = _db.GetConnection();
             var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT password_hash FROM admins WHERE username = 'admin'";
@@ -318,7 +385,7 @@ namespace ApacKiosk.Forms.Admin
 
             if (hash == null || !BCrypt.Net.BCrypt.Verify(pwdText, hash))
             {
-                MessageBox.Show("Senha incorreta.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                KioskDialog.ShowMessage("Senha incorreta.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
                 return;
             }
 
@@ -326,11 +393,11 @@ namespace ApacKiosk.Forms.Admin
             _config.EmergencyDisableMinutes = minutes;
             _db.InsertLog(null, "event", null, $"DESATIVAÇÃO DE EMERGÊNCIA: {minutes}min — Justificativa: {reason}");
 
-            MessageBox.Show(
+            KioskDialog.ShowMessage(
                 $"O kiosk será desativado por {minutes} minutos após fechar esta janela.\n" +
                 "Todos os controles de segurança serão suspensos.\n\n" +
                 "O sistema será reativado automaticamente após o tempo configurado OU na próxima reinicialização.",
-                "EMERGÊNCIA", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                "EMERGÊNCIA", MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
 
             var form = FindForm();
             if (form != null)
@@ -339,6 +406,42 @@ namespace ApacKiosk.Forms.Admin
                 timer.Tick += (s, e) => { timer.Stop(); _config.EmergencyDisableMinutes = 0; };
                 timer.Start();
                 form.Close();
+            }
+        }
+
+        private async void CheckAndUpdateSystem()
+        {
+            var form = FindForm();
+            _btnCheckUpdate.Enabled = false;
+            _btnCheckUpdate.Text = "Verificando...";
+
+            try
+            {
+                var updateManager = new UpdateManager();
+                var (success, message) = await updateManager.PerformManualUpdateAsync(form, progress =>
+                {
+                    if (form != null && !form.IsDisposed)
+                    {
+                        form.Invoke(() => _btnCheckUpdate.Text = progress);
+                    }
+                });
+
+                if (!success)
+                {
+                    KioskDialog.ShowMessage(message, _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, (Control?)form ?? this);
+                }
+            }
+            catch (Exception ex)
+            {
+                KioskDialog.ShowMessage($"Erro ao atualizar sistema:\n{ex.Message}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, (Control?)form ?? this);
+            }
+            finally
+            {
+                if (!_btnCheckUpdate.IsDisposed)
+                {
+                    _btnCheckUpdate.Enabled = true;
+                    _btnCheckUpdate.Text = "Verificar e Atualizar Sistema";
+                }
             }
         }
     }

@@ -15,11 +15,23 @@ namespace ApacKiosk.Services
         private Thread _thread;
         private volatile bool _isRunning;
         private int? _currentUserId;
+        private string _currentUsername;
+        private string _sessionTimestamp;
+        private string _screenshotDir;
 
         public ScreenCapture(ConfigManager config, DatabaseManager db)
         {
             _config = config;
             _db = db;
+        }
+
+        public void SetSessionInfo(int userId, string username, string sessionTimestamp)
+        {
+            _currentUserId = userId;
+            _currentUsername = SanitizeName(username);
+            _sessionTimestamp = sessionTimestamp;
+            _screenshotDir = BuildScreenshotDir();
+            Directory.CreateDirectory(_screenshotDir);
         }
 
         public void SetCurrentUser(int? userId)
@@ -45,6 +57,13 @@ namespace ApacKiosk.Services
             _thread?.Join(3000);
         }
 
+        private string BuildScreenshotDir()
+        {
+            var userLabel = _currentUsername ?? "system";
+            var dateLabel = _sessionTimestamp ?? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            return Path.Combine(_config.BaseLogPath, userLabel, dateLabel, "print_tela");
+        }
+
         private void CaptureLoop()
         {
             while (_isRunning)
@@ -53,7 +72,11 @@ namespace ApacKiosk.Services
                 {
                     if (_config.ScreenshotEnabled && _currentUserId.HasValue)
                     {
-                        var interval = Math.Max(_config.ScreenshotIntervalSec, 10);
+                        if (_screenshotDir == null)
+                        {
+                            _screenshotDir = BuildScreenshotDir();
+                            Directory.CreateDirectory(_screenshotDir);
+                        }
                         CaptureNow();
                     }
                 }
@@ -74,12 +97,11 @@ namespace ApacKiosk.Services
 
         public void CaptureNow()
         {
-            var userLabel = _currentUserId?.ToString() ?? "system";
-            var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            var dir = _config.ScreenshotPath;
+            var timestamp = DateTime.Now.ToString("HHmmss");
+            var dir = _screenshotDir ?? BuildScreenshotDir();
             Directory.CreateDirectory(dir);
 
-            var fileName = $"screenshot_{timestamp}_{userLabel}.jpg";
+            var fileName = $"screenshot_{timestamp}.jpg";
             var filePath = Path.Combine(dir, fileName);
 
             using var bmp = new Bitmap(System.Windows.Forms.Screen.PrimaryScreen.Bounds.Width,
@@ -104,6 +126,12 @@ namespace ApacKiosk.Services
             encoderParams.Dispose();
 
             _db.InsertLog(_currentUserId, "screenshot", filePath, null);
+        }
+
+        private static string SanitizeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "anon";
+            return string.Join("_", name.Split(Path.GetInvalidFileNameChars()));
         }
     }
 }

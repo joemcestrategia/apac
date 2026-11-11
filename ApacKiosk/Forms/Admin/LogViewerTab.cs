@@ -22,6 +22,7 @@ namespace ApacKiosk.Forms.Admin
         private DateTimePicker _dtpTo;
         private Button _btnSearch;
         private Button _btnExport;
+        private Button _btnTimeline;
         private Button _btnCleanup;
         private Label _lblPreviewTitle;
         private PictureBox _previewBox;
@@ -57,19 +58,23 @@ namespace ApacKiosk.Forms.Admin
             var lblTo = new Label { Text = "Até:", Font = new Font("Segoe UI", 9, FontStyle.Bold), ForeColor = Color.FromArgb(200, 200, 220), Location = new Point(530, 12), AutoSize = true };
             _dtpTo = new DateTimePicker { Location = new Point(530, 32), Size = new Size(160, 28), Format = DateTimePickerFormat.Short };
 
-            _btnSearch = new Button { Text = "🔍 Buscar", Location = new Point(705, 28), Size = new Size(100, 35), Font = new Font("Segoe UI", 10, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(124, 58, 237), ForeColor = Color.White, Cursor = Cursors.Hand };
+            _btnSearch = new Button { Text = "🔍 Buscar", Location = new Point(650, 28), Size = new Size(90, 35), Font = new Font("Segoe UI", 10, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(124, 58, 237), ForeColor = Color.White, Cursor = Cursors.Hand };
             _btnSearch.FlatAppearance.BorderSize = 0;
             _btnSearch.Click += (s, e) => Search();
 
-            _btnExport = new Button { Text = "📦 Exportar", Location = new Point(815, 28), Size = new Size(100, 35), Font = new Font("Segoe UI", 10, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand };
+            _btnExport = new Button { Text = "📦 Exportar", Location = new Point(745, 28), Size = new Size(100, 35), Font = new Font("Segoe UI", 10, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand };
             _btnExport.FlatAppearance.BorderSize = 0;
             _btnExport.Click += (s, e) => ExportLogs();
 
-            _btnCleanup = new Button { Text = "🧹 Limpar", Location = new Point(925, 28), Size = new Size(90, 35), Font = new Font("Segoe UI", 9, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(200, 50, 50), ForeColor = Color.White, Cursor = Cursors.Hand };
+            _btnTimeline = new Button { Text = "🎬 Linha do Tempo", Location = new Point(850, 28), Size = new Size(130, 35), Font = new Font("Segoe UI", 9, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(16, 185, 129), ForeColor = Color.White, Cursor = Cursors.Hand };
+            _btnTimeline.FlatAppearance.BorderSize = 0;
+            _btnTimeline.Click += (s, e) => OpenTimeline();
+
+            _btnCleanup = new Button { Text = "🧹 Limpar", Location = new Point(985, 28), Size = new Size(90, 35), Font = new Font("Segoe UI", 9, FontStyle.Bold), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(200, 50, 50), ForeColor = Color.White, Cursor = Cursors.Hand };
             _btnCleanup.FlatAppearance.BorderSize = 0;
             _btnCleanup.Click += (s, e) => CleanupLogs();
 
-            topPanel.Controls.AddRange(new Control[] { lblUser, _cmbUser, lblType, _cmbType, lblFrom, _dtpFrom, lblTo, _dtpTo, _btnSearch, _btnExport, _btnCleanup });
+            topPanel.Controls.AddRange(new Control[] { lblUser, _cmbUser, lblType, _cmbType, lblFrom, _dtpFrom, lblTo, _dtpTo, _btnSearch, _btnExport, _btnTimeline, _btnCleanup });
 
             _grid = new DataGridView
             {
@@ -271,7 +276,7 @@ namespace ApacKiosk.Forms.Admin
                 FileName = $"logs_export_{DateTime.Now:yyyyMMdd}.zip",
                 Title = "Exportar logs"
             };
-            if (sfd.ShowDialog() != DialogResult.OK) return;
+            if (sfd.ShowDialog(this.FindForm()) != DialogResult.OK) return;
 
             try
             {
@@ -299,23 +304,47 @@ namespace ApacKiosk.Forms.Admin
                     }
                 }
 
-                MessageBox.Show($"Logs exportados para:\n{sfd.FileName}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                KioskDialog.ShowMessage($"Logs exportados para:\n{sfd.FileName}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Erro ao exportar: {ex.Message}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                KioskDialog.ShowMessage($"Erro ao exportar: {ex.Message}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
             }
         }
 
         private void CleanupLogs()
         {
-            if (MessageBox.Show("Limpar logs antigos conforme a retenção configurada?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            if (KioskDialog.ShowMessage("Limpar logs antigos conforme a retenção configurada?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Question, this) == DialogResult.Yes)
             {
                 _db.CleanupOldLogs();
                 _db.InsertLog(null, "event", null, "Limpeza manual de logs executada");
-                MessageBox.Show("Logs antigos removidos.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                KioskDialog.ShowMessage("Logs antigos removidos.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
                 Search();
             }
+        }
+
+        private void OpenTimeline()
+        {
+            var userId = (_cmbUser.SelectedItem as ComboItem<int?>)?.Value;
+            var userName = (_cmbUser.SelectedItem as ComboItem<int?>)?.Text;
+            
+            if (!userId.HasValue)
+            {
+                KioskDialog.ShowMessage("Para ver a Linha do Tempo, por favor selecione um Usuário específico no filtro.", "Aviso", MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
+                return;
+            }
+
+            var from = _dtpFrom.Value.Date;
+            var to = _dtpTo.Value.Date;
+
+            if ((to - from).TotalDays > 0)
+            {
+                KioskDialog.ShowMessage("Para evitar sobrecarga de memória, a Linha do Tempo permite visualizar apenas 1 sessão (1 dia) por vez.\n\nPor favor, defina a data 'De' e 'Até' para o mesmo dia e tente novamente.", "Aviso de Sobrecarga", MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
+                return;
+            }
+
+            using var form = new SessionTimelineForm(_db, userId.Value, userName, from, to);
+            form.ShowDialog(this.FindForm());
         }
 
         private class ComboItem<T>

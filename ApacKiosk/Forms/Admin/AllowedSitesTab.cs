@@ -53,15 +53,17 @@ namespace ApacKiosk.Forms.Admin
             _cmbProfileFilter.SelectedIndexChanged += (s, e) => RefreshList();
 
             _btnAdd = CreateButton("+ Adicionar", 270, Color.FromArgb(124, 58, 237));
-            _btnDelete = CreateButton("✕ Remover", 425, Color.FromArgb(200, 50, 50));
-            _btnImport = CreateButton("Importar .txt", 580, Color.FromArgb(59, 130, 246));
-            _btnExport = CreateButton("Exportar", 750, Color.FromArgb(245, 158, 11));
+            var _btnSearchWeb = CreateButton("🔍 Pesquisar na Web", 425, Color.FromArgb(16, 185, 129));
+            _btnDelete = CreateButton("✕ Remover", 580, Color.FromArgb(200, 50, 50));
+            _btnImport = CreateButton("Importar .txt", 735, Color.FromArgb(59, 130, 246));
+            _btnExport = CreateButton("Exportar", 890, Color.FromArgb(245, 158, 11));
             _btnAdd.Click += (s, e) => AddSite();
+            _btnSearchWeb.Click += (s, e) => SearchWeb();
             _btnDelete.Click += (s, e) => DeleteSite();
             _btnImport.Click += (s, e) => ImportSites();
             _btnExport.Click += (s, e) => ExportSites();
 
-            topPanel.Controls.AddRange(new Control[] { lblFilter, _cmbProfileFilter, _btnAdd, _btnDelete, _btnImport, _btnExport });
+            topPanel.Controls.AddRange(new Control[] { lblFilter, _cmbProfileFilter, _btnAdd, _btnSearchWeb, _btnDelete, _btnImport, _btnExport });
 
             _grid = new DataGridView
             {
@@ -87,6 +89,7 @@ namespace ApacKiosk.Forms.Admin
             _grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(124, 58, 237);
             _grid.Columns.Add("Id", "ID");
             _grid.Columns.Add("Url", "URL/Domínio");
+            _grid.Columns.Add("Icon", "Ícone");
             _grid.Columns.Add("Profile", "Perfil");
             _grid.Columns.Add("Global", "Global");
             _grid.Columns.Add("Added", "Adicionado em");
@@ -134,7 +137,7 @@ namespace ApacKiosk.Forms.Admin
                 foreach (var s in sites)
                 {
                     var profileName = s.IsGlobal ? "Global" : (_profileService.GetAll().FirstOrDefault(p => p.Id == s.ProfileId)?.Name ?? "-");
-                    _grid.Rows.Add(s.Id, s.UrlPattern, profileName, s.IsGlobal ? "Sim" : "Não", s.CreatedAt.ToString("dd/MM/yyyy"));
+                    _grid.Rows.Add(s.Id, s.UrlPattern, string.IsNullOrEmpty(s.IconPath) ? "(padrão)" : Path.GetFileName(s.IconPath), profileName, s.IsGlobal ? "Sim" : "Não", s.CreatedAt.ToString("dd/MM/yyyy"));
                 }
             }
             catch { }
@@ -142,26 +145,149 @@ namespace ApacKiosk.Forms.Admin
 
         private void AddSite()
         {
-            var input = Microsoft.VisualBasic.Interaction.InputBox("Digite a URL ou domínio (ex: wikipedia.org):", "Adicionar Site", "");
-            if (string.IsNullOrWhiteSpace(input)) return;
+            var form = new Form
+            {
+                Text = "Adicionar Site",
+                Size = new Size(550, 270),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                BackColor = Color.FromArgb(22, 22, 45),
+                MaximizeBox = false, MinimizeBox = false, TopMost = true
+            };
+            form.Owner = this.FindForm() as Form;
 
-            var filterProfile = (_cmbProfileFilter.SelectedItem as ComboItem<int?>)?.Value;
-            var isGlobal = !filterProfile.HasValue;
-            _siteService.Add(input.Trim(), filterProfile, isGlobal);
-            _db.InsertLog(null, "event", null, $"Site adicionado: {input}");
-            RefreshList();
+            var lbl = new Label
+            {
+                Text = "Digite a URL ou domínio (ex: wikipedia.org):",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(200, 200, 220),
+                Location = new Point(20, 20),
+                AutoSize = true
+            };
+
+            var txtInput = new TextBox
+            {
+                Location = new Point(20, 50),
+                Size = new Size(490, 28),
+                Font = new Font("Segoe UI", 11),
+                BackColor = Color.FromArgb(26, 26, 46),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            var lblIcon = new Label
+            {
+                Text = "Ícone personalizado (opcional):",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(200, 200, 220),
+                Location = new Point(20, 90),
+                AutoSize = true
+            };
+
+            var txtIconPath = new TextBox
+            {
+                Location = new Point(20, 118),
+                Size = new Size(380, 28),
+                Font = new Font("Segoe UI", 10),
+                BackColor = Color.FromArgb(26, 26, 46),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                ReadOnly = true
+            };
+
+            var btnBrowseIcon = new Button
+            {
+                Text = "Procurar",
+                Location = new Point(410, 118),
+                Size = new Size(100, 28),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(59, 130, 246),
+                ForeColor = Color.White,
+                Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                Cursor = Cursors.Hand
+            };
+            btnBrowseIcon.FlatAppearance.BorderSize = 0;
+            btnBrowseIcon.Click += (s, e) =>
+            {
+                using var ofd = new OpenFileDialog { Filter = "Imagens|*.png;*.ico;*.jpg;*.jpeg;*.bmp", Title = "Selecionar ícone" };
+                if (ofd.ShowDialog(this.FindForm()) == DialogResult.OK)
+                    txtIconPath.Text = ofd.FileName;
+            };
+
+            string? iconPath = null;
+
+            var btnOk = new Button
+            {
+                Text = "Adicionar",
+                Location = new Point(180, 180),
+                Size = new Size(180, 35),
+                Font = new Font("Segoe UI", 11, FontStyle.Bold),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(124, 58, 237),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand
+            };
+            btnOk.FlatAppearance.BorderSize = 0;
+            btnOk.Click += (s, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(txtInput.Text))
+                {
+                    var input = txtInput.Text.Trim();
+                    var filterProfile = (_cmbProfileFilter.SelectedItem as ComboItem<int?>)?.Value;
+                    var isGlobal = !filterProfile.HasValue;
+                    if (!string.IsNullOrWhiteSpace(txtIconPath.Text))
+                        iconPath = txtIconPath.Text.Trim();
+                    _siteService.Add(input, filterProfile, isGlobal, iconPath);
+                    _db.InsertLog(null, "event", null, $"Site adicionado: {input}");
+                    RefreshList();
+                }
+                form.Close();
+            };
+
+            var btnClearIcon = new Button
+            {
+                Text = "Limpar",
+                Location = new Point(20, 180),
+                Size = new Size(100, 35),
+                Font = new Font("Segoe UI", 10),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(200, 50, 50),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand
+            };
+            btnClearIcon.FlatAppearance.BorderSize = 0;
+            btnClearIcon.Click += (s, e) => { txtIconPath.Text = ""; iconPath = null; };
+
+            txtInput.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) btnOk.PerformClick(); };
+            form.AcceptButton = btnOk;
+
+            form.Controls.AddRange(new Control[] { lbl, txtInput, lblIcon, txtIconPath, btnBrowseIcon, btnClearIcon, btnOk });
+            form.ShowDialog(this.FindForm());
+        }
+
+        private void SearchWeb()
+        {
+            using var searchForm = new SearchSiteForm();
+            if (searchForm.ShowDialog(this.FindForm()) == DialogResult.OK && !string.IsNullOrWhiteSpace(searchForm.SelectedDomain))
+            {
+                var filterProfile = (_cmbProfileFilter.SelectedItem as ComboItem<int?>)?.Value;
+                var isGlobal = !filterProfile.HasValue;
+                _siteService.Add(searchForm.SelectedDomain, filterProfile, isGlobal, null);
+                _db.InsertLog(null, "event", null, $"Site adicionado via pesquisa: {searchForm.SelectedDomain}");
+                RefreshList();
+            }
         }
 
         private void DeleteSite()
         {
             if (_grid.SelectedRows.Count == 0)
             {
-                MessageBox.Show("Selecione um site para remover.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("Selecione um site para remover.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
             var id = Convert.ToInt32(_grid.SelectedRows[0].Cells[0].Value);
             var url = _grid.SelectedRows[0].Cells[1].Value.ToString();
-            if (MessageBox.Show($"Remover \"{url}\"?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            if (KioskDialog.ShowMessage($"Remover \"{url}\"?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Question, this) == DialogResult.Yes)
             {
                 _siteService.Delete(id);
                 RefreshList();
@@ -171,21 +297,21 @@ namespace ApacKiosk.Forms.Admin
         private void ImportSites()
         {
             using var ofd = new OpenFileDialog { Filter = "Arquivo de texto|*.txt", Title = "Importar lista de sites" };
-            if (ofd.ShowDialog() != DialogResult.OK) return;
+            if (ofd.ShowDialog(this.FindForm()) != DialogResult.OK) return;
 
             var filterProfile = (_cmbProfileFilter.SelectedItem as ComboItem<int?>)?.Value;
             var isGlobal = !filterProfile.HasValue;
             _siteService.ImportFromFile(ofd.FileName, filterProfile, isGlobal);
-            MessageBox.Show("Importação concluída.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            KioskDialog.ShowMessage("Importação concluída.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
             RefreshList();
         }
 
         private void ExportSites()
         {
             using var sfd = new SaveFileDialog { Filter = "Arquivo de texto|*.txt", Title = "Exportar lista de sites", FileName = "sites_permitidos.txt" };
-            if (sfd.ShowDialog() != DialogResult.OK) return;
+            if (sfd.ShowDialog(this.FindForm()) != DialogResult.OK) return;
             _siteService.ExportToFile(sfd.FileName);
-            MessageBox.Show("Exportação concluída.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            KioskDialog.ShowMessage("Exportação concluída.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
         }
 
         private void TestUrl()

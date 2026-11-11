@@ -2,8 +2,10 @@ using ApacKiosk.Services;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace ApacKiosk.Browser;
@@ -23,6 +25,12 @@ public class KioskBrowserControl : WebView2
     public KioskBrowserControl()
     {
         Dock = DockStyle.Fill;
+        var userDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ApacKiosk", "WebView2Profile");
+        CreationProperties = new CoreWebView2CreationProperties
+        {
+            UserDataFolder = userDataFolder,
+            AdditionalBrowserArguments = "--no-sandbox --disable-gpu-sandbox"
+        };
     }
 
     public async Task InitializeAsync(SiteService siteService, int? profileId, string homeUrl)
@@ -31,14 +39,14 @@ public class KioskBrowserControl : WebView2
         _profileId = profileId;
         _blockedHtml = LoadBlockedHtml();
 
-        var env = await CoreWebView2Environment.CreateAsync();
-        await EnsureCoreWebView2Async(env);
+        await EnsureCoreWebView2Async();
 
         CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
         CoreWebView2.Settings.AreDevToolsEnabled = false;
         CoreWebView2.Settings.IsStatusBarEnabled = false;
         CoreWebView2.Settings.IsPasswordAutosaveEnabled = false;
         CoreWebView2.Settings.IsGeneralAutofillEnabled = false;
+        CoreWebView2.Settings.AreHostObjectsAllowed = false;
 
         CoreWebView2.NavigationStarting += OnNavigationStarting;
         CoreWebView2.NewWindowRequested += OnNewWindowRequested;
@@ -58,7 +66,27 @@ public class KioskBrowserControl : WebView2
     {
         if (!_initialized || _siteService == null) return;
 
-        if (e.Uri.StartsWith("about:") || e.Uri == "https://apac.local/blocked")
+        var uriString = e.Uri;
+        if (!Uri.TryCreate(uriString, UriKind.Absolute, out var uri))
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        var scheme = uri.Scheme?.ToLowerInvariant() ?? "";
+        var blockedSchemes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "file", "edge", "chrome", "javascript", "data", "blob",
+            "about", "ms-settings", "ms-windows-store"
+        };
+
+        if (blockedSchemes.Contains(scheme))
+        {
+            e.Cancel = true;
+            return;
+        }
+
+        if (uriString.StartsWith("about:") || e.Uri == "https://apac.local/blocked")
             return;
 
         if (!_siteService.IsUrlAllowed(e.Uri, _profileId))

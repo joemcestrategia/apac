@@ -76,6 +76,7 @@ namespace ApacKiosk.Database
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     profile_id INTEGER REFERENCES access_profiles(id) ON DELETE CASCADE,
                     url_pattern TEXT NOT NULL,
+                    icon_path TEXT,
                     is_global INTEGER DEFAULT 0,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
@@ -130,8 +131,20 @@ namespace ApacKiosk.Database
             ";
             cmd.ExecuteNonQuery();
 
+            MigrateSchema(conn);
             SeedDefaultAdmin(conn);
             SeedDefaultSettings(conn);
+        }
+
+        private void MigrateSchema(SqliteConnection conn)
+        {
+            try
+            {
+                var cmd = conn.CreateCommand();
+                cmd.CommandText = "ALTER TABLE allowed_sites ADD COLUMN icon_path TEXT";
+                cmd.ExecuteNonQuery();
+            }
+            catch { }
         }
 
         private void SeedDefaultAdmin(SqliteConnection conn)
@@ -163,6 +176,7 @@ namespace ApacKiosk.Database
                 ["camera_interval_sec"] = "120",
                 ["camera_quality"] = "Medium",
                 ["camera_path"] = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "APAC", "Camera"),
+                ["camera_device_name"] = "",
                 ["keylogger_enabled"] = "true",
                 ["keylogger_path"] = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "APAC", "Keylogs"),
                 ["keylogger_file_mode"] = "daily",

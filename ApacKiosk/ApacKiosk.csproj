@@ -8,21 +8,38 @@
     <Nullable>enable</Nullable>
     <AssemblyName>ApacKiosk</AssemblyName>
     <RootNamespace>ApacKiosk</RootNamespace>
+    <Version>1.0.3.0</Version>
+    <FileVersion>1.0.3.0</FileVersion>
+    <AssemblyVersion>1.0.3.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="KioskService\**" />
+    <Compile Remove="KioskInstaller\**" />
+    <None Remove="KioskService\**" />
+    <None Remove="KioskInstaller\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Chaos.NaCl.Standard" Version="1.0.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.0" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2903.40" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="AForge.Video" Version="2.2.5" />
     <PackageReference Include="AForge.Video.DirectShow" Version="2.2.5" />
     <PackageReference Include="System.Drawing.Common" Version="8.0.0" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="Resources\*">
+    <EmbeddedResource Include="Resources\LogoApac.png" />
+    <None Include="Resources\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+
+  <Target Name="CopyLogoToPublish" AfterTargets="Publish">
+    <Copy SourceFiles="Resources\LogoApac.png" DestinationFolder="$(PublishDir)\Resources" />
+  </Target>
 
 </Project>

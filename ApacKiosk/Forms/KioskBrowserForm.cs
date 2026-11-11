@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Data;
 using System.Drawing;
 using System.IO;
@@ -22,12 +23,17 @@ namespace ApacKiosk.Forms
         private readonly MonitorService _monitor;
         private readonly SecurityManager _security;
         private readonly Models.User _user;
+        private readonly SiteService _siteService;
         private WebView2 _webView;
         private Panel _navBar;
         private Button _btnBack;
         private Button _btnForward;
         private TextBox _urlBox;
         private Button _btnHome;
+        private Panel _infoPanel;
+        private Label _infoDateLabel;
+        private Label _infoTimeLabel;
+        private Label _infoSessionLabel;
         private Label _timerLabel;
         private Label _userLabel;
         private System.Windows.Forms.PictureBox _userPhoto;
@@ -47,6 +53,7 @@ namespace ApacKiosk.Forms
             MonitorService monitor, SecurityManager security, Models.User user)
         {
             _db = db;
+            _siteService = new SiteService(db);
             _config = config;
             _monitor = monitor;
             _security = security;
@@ -56,7 +63,6 @@ namespace ApacKiosk.Forms
 
             LoadProfileSettings();
             InitializeComponent();
-            InitializeWebView();
             StartSession();
         }
 
@@ -156,6 +162,65 @@ namespace ApacKiosk.Forms
                 AutoSize = true
             };
 
+            _infoPanel = new Panel
+            {
+                Height = 34,
+                Width = 280,
+                BackColor = Color.FromArgb(124, 58, 237),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right
+            };
+
+            _infoTimeLabel = new Label
+            {
+                Text = DateTime.Now.ToString("HH:mm:ss"),
+                Font = new Font("Segoe UI", 12, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(10, 5),
+                BackColor = Color.Transparent
+            };
+
+            _infoDateLabel = new Label
+            {
+                Text = DateTime.Now.ToString("dd/MM/yyyy"),
+                Font = new Font("Segoe UI", 9),
+                ForeColor = Color.FromArgb(220, 220, 255),
+                AutoSize = true,
+                Location = new Point(10, 19),
+                BackColor = Color.Transparent
+            };
+
+            _infoSessionLabel = new Label
+            {
+                Text = "⏱  00:00",
+                Font = new Font("Segoe UI", 12, FontStyle.Bold),
+                ForeColor = Color.White,
+                AutoSize = true,
+                Location = new Point(130, 5),
+                BackColor = Color.Transparent
+            };
+
+            var sepLine = new Label
+            {
+                Text = "│",
+                Font = new Font("Segoe UI", 14),
+                ForeColor = Color.FromArgb(180, 140, 255),
+                AutoSize = true,
+                Location = new Point(120, 3),
+                BackColor = Color.Transparent
+            };
+
+            _infoPanel.Controls.AddRange(new Control[] { _infoTimeLabel, _infoDateLabel, _infoSessionLabel, sepLine });
+
+            var clockTimer = new Timer { Interval = 1000 };
+            clockTimer.Tick += (s, e) =>
+            {
+                var now = DateTime.Now;
+                _infoTimeLabel.Text = now.ToString("HH:mm:ss");
+                _infoDateLabel.Text = now.ToString("dd/MM/yyyy");
+            };
+            clockTimer.Start();
+
             _userLabel = new Label
             {
                 Text = _user.FullName,
@@ -175,9 +240,16 @@ namespace ApacKiosk.Forms
                 try { _userPhoto.Image = Image.FromFile(_user.PhotoPath); } catch { }
             }
 
-            _navBar.Controls.AddRange(new Control[] { _btnBack, _btnForward, _urlBox, _btnHome, _timerLabel, _userLabel, _userPhoto });
+            _navBar.Controls.AddRange(new Control[] { _btnBack, _btnForward, _urlBox, _btnHome, _timerLabel, _infoPanel, _userLabel, _userPhoto });
 
             _webView = new WebView2 { Dock = DockStyle.Fill };
+            
+            var userDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ApacKiosk", "WebView2Profile");
+            _webView.CreationProperties = new CoreWebView2CreationProperties
+            {
+                UserDataFolder = userDataFolder,
+                AdditionalBrowserArguments = "--no-sandbox --disable-gpu-sandbox"
+            };
 
             Controls.Add(_webView);
             Controls.Add(_navBar);
@@ -185,45 +257,76 @@ namespace ApacKiosk.Forms
 
         private async void InitializeWebView()
         {
-            await _webView.EnsureCoreWebView2Async(null);
-            var env = await CoreWebView2Environment.CreateAsync();
-
-            _webView.CoreWebView2.NewWindowRequested += (s, e) =>
+            try
             {
-                e.Handled = true;
-                _webView.CoreWebView2.Navigate(e.Uri);
-            };
+                await _webView.EnsureCoreWebView2Async();
 
-            _webView.CoreWebView2.DownloadStarting += (s, e) =>
+
+                _webView.CoreWebView2.NewWindowRequested += (s, e) =>
+                {
+                    e.Handled = true;
+                    _webView.CoreWebView2.Navigate(e.Uri);
+                };
+
+                _webView.CoreWebView2.DownloadStarting += (s, e) =>
+                {
+                    e.Cancel = true;
+                    e.Handled = true;
+                };
+
+                _webView.CoreWebView2.NavigationStarting += OnNavigationStarting;
+                _webView.CoreWebView2.NavigationCompleted += (s, e) =>
+                {
+                    if (!e.IsSuccess)
+                    {
+                        var logFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "webview_error.log");
+                        File.AppendAllText(logFile, $"{DateTime.Now}: Navigation failed. URL: {_webView.Source}, ErrorStatus: {e.WebErrorStatus}\n");
+                        try { _db.InsertLog(_user.Id, "error", null, $"Navigation failed: {e.WebErrorStatus}"); } catch { }
+                    }
+                };
+
+                _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                _webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
+                _webView.CoreWebView2.Settings.AreHostObjectsAllowed = false;
+
+                NavigateHome();
+            }
+            catch (Exception ex)
             {
-                e.Cancel = true;
-                e.Handled = true;
-            };
-
-            _webView.CoreWebView2.NavigationStarting += OnNavigationStarting;
-            _webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-            _webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
-            _webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
-            _webView.CoreWebView2.Settings.IsZoomControlEnabled = false;
-
-            NavigateHome();
+                var logFile = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "webview_error.log");
+                File.AppendAllText(logFile, $"{DateTime.Now}: Critical error initializing WebView2: {ex}\n");
+                KioskDialog.ShowMessage($"Erro crítico ao inicializar o navegador: {ex.Message}\n\nVerifique webview_error.log", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
+                try { _db.InsertLog(_user.Id, "error", null, $"WebView2 init error: {ex.Message}"); } catch { }
+            }
         }
 
         private void OnNavigationStarting(object sender, CoreWebView2NavigationStartingEventArgs e)
         {
             if (e.Uri == null) return;
 
-            var uri = new Uri(e.Uri);
-
-            if (uri.ToString().StartsWith("about:"))
+            var uriString = e.Uri;
+            if (!Uri.TryCreate(uriString, UriKind.Absolute, out var uri))
             {
-                _db.InsertLog(_user.Id, "navigation_blocked", null, $"Bloqueado: {uri}");
                 e.Cancel = true;
-                NavigateToBlockedPage(uri.ToString());
                 return;
             }
 
-            if (IsUrlAllowed(uri))
+            var scheme = uri.Scheme?.ToLowerInvariant() ?? "";
+            var blockedSchemes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "file", "edge", "chrome", "javascript", "data", "blob",
+                "about", "ms-settings", "ms-windows-store"
+            };
+
+            if (blockedSchemes.Contains(scheme))
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            if (_siteService.IsUrlAllowed(e.Uri, _user.ProfileId))
             {
                 _urlBox.Text = uri.ToString();
                 _db.InsertLog(_user.Id, "navigation_allowed", null, uri.ToString());
@@ -234,52 +337,6 @@ namespace ApacKiosk.Forms
                 e.Cancel = true;
                 NavigateToBlockedPage(uri.ToString());
             }
-        }
-
-        private bool IsUrlAllowed(Uri uri)
-        {
-            using var conn = _db.GetConnection();
-            var cmd = conn.CreateCommand();
-            var host = uri.Host;
-
-            if (_user.ProfileId.HasValue)
-            {
-                cmd.CommandText = @"SELECT url_pattern FROM allowed_sites WHERE profile_id = @pid OR is_global = 1";
-                cmd.Parameters.AddWithValue("@pid", _user.ProfileId.Value);
-            }
-            else
-            {
-                cmd.CommandText = @"SELECT url_pattern FROM allowed_sites WHERE is_global = 1";
-            }
-
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
-            {
-                var pattern = reader.GetString(0).Trim().ToLowerInvariant();
-                if (string.IsNullOrEmpty(pattern)) continue;
-
-                if (pattern.Contains("*"))
-                {
-                    var regexPattern = ConvertWildcardToRegex(pattern);
-                    if (Regex.IsMatch(host, regexPattern, RegexOptions.IgnoreCase))
-                        return true;
-                    if (Regex.IsMatch(uri.ToString().ToLowerInvariant(), regexPattern, RegexOptions.IgnoreCase))
-                        return true;
-                }
-                else
-                {
-                    if (host.Contains(pattern) || uri.ToString().ToLowerInvariant().Contains(pattern.ToLowerInvariant()))
-                        return true;
-                }
-            }
-            return false;
-        }
-
-        private static string ConvertWildcardToRegex(string pattern)
-        {
-            pattern = pattern.Replace(".", "\\.");
-            pattern = pattern.Replace("*", ".*");
-            return "^" + pattern + "$";
         }
 
         private void NavigateToBlockedPage(string url)
@@ -342,8 +399,8 @@ namespace ApacKiosk.Forms
                 _monitor?.Keylog?.SetCurrentUser(null);
                 _monitor?.Screenshot?.SetCurrentUser(null);
                 _monitor?.Camera?.SetCurrentUser(null);
-                MessageBox.Show("Sua sessão expirou. Tempo máximo de uso atingido.",
-                    _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                KioskDialog.ShowMessage("Sua sessão expirou. Tempo máximo de uso atingido.",
+                    _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
                 EndSession();
                 BeginInvoke(new Action(() => Close()));
                 return;
@@ -360,8 +417,23 @@ namespace ApacKiosk.Forms
 
             var remaining = _maxSessionSeconds > 0 ? _maxSessionSeconds - _elapsedSec : int.MaxValue;
             UpdateTimerDisplay(remaining);
+            UpdateElapsedDisplay();
         }
         private int _elapsedSec;
+
+        private void UpdateElapsedDisplay()
+        {
+            var hours = _elapsedSec / 3600;
+            var minutes = (_elapsedSec % 3600) / 60;
+            var seconds = _elapsedSec % 60;
+            var timerText = hours > 0
+                ? $"⏱  {hours:D2}:{minutes:D2}:{seconds:D2}"
+                : $"⏱  {minutes:D2}:{seconds:D2}";
+            if (_infoSessionLabel.InvokeRequired)
+                _infoSessionLabel.BeginInvoke(new Action(() => _infoSessionLabel.Text = timerText));
+            else
+                _infoSessionLabel.Text = timerText;
+        }
 
         private void UpdateTimerDisplay(int remaining)
         {
@@ -396,27 +468,40 @@ namespace ApacKiosk.Forms
             _db.InsertLog(_user.Id, "mandatory_pause", null,
                 $"Pausa obrigatória iniciada: {_mandatoryPauseSec / 60}min");
 
-            var pauseForm = new Form
+            // Overlay de pausa obrigatória dentro da janela principal
+            var overlay = new Panel
             {
-                Text = "Pausa Obrigatória",
-                Size = new Size(500, 300),
-                StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
-                BackColor = Color.FromArgb(15, 15, 35),
-                TopMost = true,
-                ControlBox = false
+                Size = ClientSize,
+                Location = new Point(0, 0),
+                Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
+                BackColor = Color.FromArgb(1, 1, 1)
+            };
+            overlay.Paint += (s2, e2) =>
+            {
+                using var brush = new SolidBrush(Color.FromArgb(200, 0, 0, 0));
+                e2.Graphics.FillRectangle(brush, overlay.ClientRectangle);
             };
 
-            var label = new Label
+            var pauseLabel = new Label
             {
-                Text = $"Pausa obrigatória\nAguarde {_mandatoryPauseSec / 60} minuto(s) antes de continuar.",
-                Font = new Font("Segoe UI", 14),
+                Text = $"⏸ Pausa obrigatória\nAguarde {_mandatoryPauseSec / 60} minuto(s) antes de continuar.",
+                Font = new Font("Segoe UI", 18, FontStyle.Bold),
                 ForeColor = Color.White,
                 TextAlign = ContentAlignment.MiddleCenter,
-                Dock = DockStyle.Fill
+                AutoSize = false,
+                Size = new Size(600, 120),
+                BackColor = Color.Transparent
             };
-            pauseForm.Controls.Add(label);
+            pauseLabel.Location = new Point(
+                (overlay.Width - pauseLabel.Width) / 2,
+                (overlay.Height - pauseLabel.Height) / 2
+            );
+            overlay.Controls.Add(pauseLabel);
 
+            Controls.Add(overlay);
+            overlay.BringToFront();
+
+            bool pauseDone = false;
             var pauseTimer = new Timer { Interval = 1000 };
             var pauseStart = DateTime.Now;
             pauseTimer.Tick += (s, args) =>
@@ -425,20 +510,27 @@ namespace ApacKiosk.Forms
                 if (elapsed >= _mandatoryPauseSec)
                 {
                     pauseTimer.Stop();
-                    pauseForm.Close();
+                    pauseDone = true;
                     _lastPauseEnd = DateTime.Now;
                     _monitor?.Keylog?.SetCurrentUser(_user.Id);
                     _monitor?.Screenshot?.SetCurrentUser(_user.Id);
                     _monitor?.Camera?.SetCurrentUser(_user.Id);
                     _sessionTimer.Start();
                     _db.InsertLog(_user.Id, "mandatory_pause_end", null, "Pausa obrigatória finalizada");
+                    Controls.Remove(overlay);
+                    overlay.Dispose();
                     return;
                 }
                 var remaining = (int)(_mandatoryPauseSec - elapsed);
-                label.Text = $"Pausa obrigatória\nAguarde {remaining / 60:D2}:{remaining % 60:D2} antes de continuar.";
+                pauseLabel.Text = $"⏸ Pausa obrigatória\nAguarde {remaining / 60:D2}:{remaining % 60:D2} antes de continuar.";
             };
-            pauseForm.Shown += (s, args) => pauseTimer.Start();
-            pauseForm.ShowDialog();
+            pauseTimer.Start();
+
+            while (!pauseDone && !overlay.IsDisposed)
+            {
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(10);
+            }
         }
 
         private void EndSession()
@@ -468,95 +560,49 @@ namespace ApacKiosk.Forms
 
             e.Cancel = true;
 
-            var pwdPrompt = new Form
-            {
-                Text = "Senha para Fechar",
-                Size = new Size(400, 200),
-                StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
-                BackColor = Color.FromArgb(15, 15, 35),
-                TopMost = true
-            };
+            var (result, pwd) = KioskDialog.ShowPasswordPrompt(
+                "Digite a senha de administrador para fechar:",
+                "Senha para Fechar", this);
 
-            var lbl = new Label
-            {
-                Text = "Digite a senha de administrador para fechar:",
-                Font = new Font("Segoe UI", 11),
-                ForeColor = Color.White,
-                Location = new Point(20, 20),
-                AutoSize = true
-            };
-
-            var txt = new TextBox
-            {
-                Location = new Point(20, 60),
-                Size = new Size(340, 30),
-                PasswordChar = '●',
-                Font = new Font("Segoe UI", 12),
-                BackColor = Color.FromArgb(26, 26, 46),
-                ForeColor = Color.White
-            };
-
-            var btnOk = new Button
-            {
-                Text = "Fechar",
-                Location = new Point(150, 110),
-                Size = new Size(100, 35),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(200, 50, 50),
-                ForeColor = Color.White
-            };
-            btnOk.FlatAppearance.BorderSize = 0;
-
-            var btnCancel = new Button
-            {
-                Text = "Cancelar",
-                Location = new Point(260, 110),
-                Size = new Size(100, 35),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(42, 42, 70),
-                ForeColor = Color.White,
-                DialogResult = DialogResult.Cancel
-            };
-            btnCancel.FlatAppearance.BorderSize = 0;
-
-            btnOk.Click += (s, args) =>
+            if (result == DialogResult.OK)
             {
                 using var conn = _db.GetConnection();
                 var cmd = conn.CreateCommand();
                 cmd.CommandText = "SELECT password_hash FROM admins WHERE username = 'admin'";
                 var hash = cmd.ExecuteScalar()?.ToString();
-                if (hash != null && PasswordHash.VerifyPassword(txt.Text, hash))
+                if (hash != null && PasswordHash.VerifyPassword(pwd, hash))
                 {
-                    pwdPrompt.DialogResult = DialogResult.OK;
-                    pwdPrompt.Close();
+                    _isShuttingDown = true;
+                    EndSession();
+                    _security?.DisableAllSecurity();
+                    DialogResult = DialogResult.OK;
+                    Environment.Exit(0);
                 }
                 else
                 {
-                    MessageBox.Show("Senha inválida.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    KioskDialog.ShowMessage("Senha inválida.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
                 }
-            };
-
-            pwdPrompt.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
-            pwdPrompt.AcceptButton = btnOk;
-            pwdPrompt.CancelButton = btnCancel;
-
-            if (pwdPrompt.ShowDialog() == DialogResult.OK)
-            {
-                _isShuttingDown = true;
-                EndSession();
-                _security?.DisableAllSecurity();
-                DialogResult = DialogResult.OK;
-                Environment.Exit(0);
             }
         }
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            _security?.SetMainWindow(Handle);
-            _monitor?.SetCurrentUser(_user.Id);
-            _monitor?.StartAll();
+            _infoPanel.Location = new Point(ClientSize.Width - _infoPanel.Width - 80, 5);
+            try
+            {
+                _security?.SetMainWindow(Handle);
+                _security?.EnableAllSecurity();
+                _monitor?.SetSessionInfo(_user.Id, _user.Username);
+                _monitor?.StartAll();
+                
+                InitializeWebView();
+            }
+            catch (Exception ex)
+            {
+                try { _db.InsertLog(_user.Id, "error", null, $"OnShown: {ex.Message}"); } catch { }
+                _monitor?.StopAll();
+            }
         }
     }
 }

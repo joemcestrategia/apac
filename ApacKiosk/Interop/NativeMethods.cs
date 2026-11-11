@@ -18,6 +18,7 @@ internal static class NativeMethods
     public const uint MOD_NOREPEAT = 0x4000;
 
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000;
     public const uint WINEVENT_SKIPOWNPROCESS = 0x0002;
 
@@ -121,6 +122,12 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool BlockInput(bool fBlockIt);
 
+    [DllImport("user32.dll")]
+    public static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    public static extern int SendMessage(IntPtr hWnd, int Msg, int wParam, int lParam);
+
     public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 
     public delegate void WinEventDelegate(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint dwEventThread, uint dwmsEventTime);
@@ -140,5 +147,62 @@ internal static class NativeMethods
     {
         public uint cbSize;
         public int iMinAnimate;
+    }
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    public static extern bool WTSQueryUserToken(uint sessionId, ref IntPtr phToken);
+
+    [DllImport("kernel32.dll")]
+    public static extern uint GetActiveConsoleSessionId();
+
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern bool CreateProcessAsUser(
+        IntPtr hToken,
+        string lpApplicationName,
+        string? lpCommandLine,
+        IntPtr lpProcessAttributes,
+        IntPtr lpThreadAttributes,
+        bool bInheritHandles,
+        uint dwCreationFlags,
+        IntPtr lpEnvironment,
+        string? lpCurrentDirectory,
+        ref STARTUPINFO lpStartupInfo,
+        out PROCESS_INFORMATION lpProcessInformation);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    public static extern bool CreateEnvironmentBlock(ref IntPtr lpEnvironment, IntPtr hToken, bool bInherit);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    public static extern bool DestroyEnvironmentBlock(IntPtr lpEnvironment);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct STARTUPINFO
+    {
+        public int cb;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpDesktop;
+        [MarshalAs(UnmanagedType.LPWStr)] public string lpTitle;
+        public int dwX;
+        public int dwY;
+        public int dwXSize;
+        public int dwYSize;
+        public int dwXCountChars;
+        public int dwYCountChars;
+        public int dwFillAttribute;
+        public int dwFlags;
+        public short wShowWindow;
+        public short cbReserved2;
+        public IntPtr lpReserved2;
+        public IntPtr hStdInput;
+        public IntPtr hStdOutput;
+        public IntPtr hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROCESS_INFORMATION
+    {
+        public IntPtr hProcess;
+        public IntPtr hThread;
+        public uint dwProcessId;
+        public uint dwThreadId;
     }
 }

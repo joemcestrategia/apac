@@ -3,6 +3,7 @@ using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 using ApacKiosk.Database;
+using ApacKiosk.Services;
 using ApacKiosk.Utils;
 
 namespace ApacKiosk.Forms.Admin
@@ -17,6 +18,9 @@ namespace ApacKiosk.Forms.Admin
         private int _activeTabIndex;
         private Label _titleLabel;
         private UserControl _activeControl;
+        private bool _isReady;
+
+        public bool LogoutRequested { get; private set; }
 
         private static readonly (string Text, string Icon)[] Tabs = new[]
         {
@@ -34,9 +38,21 @@ namespace ApacKiosk.Forms.Admin
         {
             _db = db;
             _config = config;
+            LogTrace("AdminDashboard.ctor iniciando");
             InitializeComponent();
-            CheckDefaultPassword();
+            LogTrace("AdminDashboard.InitializeComponent concluido");
             SwitchTab(0);
+            LogTrace("AdminDashboard.ctor concluido");
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            _isReady = true;
+            Program.Security?.SetKioskLock(false);
+            LogTrace("AdminDashboard.OnShown - chamando CheckDefaultPassword");
+            CheckDefaultPassword();
+            LogTrace("AdminDashboard.OnShown concluido");
         }
 
         private void InitializeComponent()
@@ -60,9 +76,10 @@ namespace ApacKiosk.Forms.Admin
 
             var logoBox = new PictureBox
             {
-                Size = new Size(60, 60),
-                Location = new Point(90, 15),
-                SizeMode = PictureBoxSizeMode.Zoom
+                Size = new Size(100, 100),
+                Location = new Point(70, 20),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.Transparent
             };
             LoadAdminLogo(logoBox);
 
@@ -71,9 +88,9 @@ namespace ApacKiosk.Forms.Admin
                 Text = "APAC Kiosk\nGuardian",
                 Font = new Font("Segoe UI", 16, FontStyle.Bold),
                 ForeColor = Color.FromArgb(124, 58, 237),
-                Location = new Point(20, 80),
-                Size = new Size(200, 50),
-                TextAlign = ContentAlignment.MiddleLeft
+                Location = new Point(20, 125),
+                Size = new Size(200, 60),
+                TextAlign = ContentAlignment.MiddleCenter
             };
 
             var versionLabel = new Label
@@ -81,20 +98,22 @@ namespace ApacKiosk.Forms.Admin
                 Text = "v1.0 — Administração",
                 Font = new Font("Segoe UI", 9),
                 ForeColor = Color.FromArgb(120, 120, 140),
-                Location = new Point(20, 130),
-                AutoSize = true
+                Location = new Point(20, 185),
+                AutoSize = false,
+                Size = new Size(200, 20),
+                TextAlign = ContentAlignment.MiddleCenter
             };
 
             var separator = new Panel
             {
                 Height = 2,
                 Width = 200,
-                Location = new Point(20, 160),
+                Location = new Point(20, 215),
                 BackColor = Color.FromArgb(50, 50, 80)
             };
 
             _navButtons = new Button[Tabs.Length];
-            var y = 180;
+            var y = 235;
             for (int i = 0; i < Tabs.Length; i++)
             {
                 var btn = new Button
@@ -117,23 +136,37 @@ namespace ApacKiosk.Forms.Admin
                 y += 50;
             }
 
-            var closeBtn = new Button
+            var logoutBtn = new Button
             {
-                Text = "  ✕  Fechar Painel Admin",
+                Text = "  ↩  Sair / Logout",
                 Font = new Font("Segoe UI", 11),
                 FlatStyle = FlatStyle.Flat,
                 Size = new Size(220, 44),
-                Location = new Point(10, y + 20),
+                Location = new Point(10, y + 10),
+                TextAlign = ContentAlignment.MiddleLeft,
+                BackColor = Color.FromArgb(245, 158, 11),
+                ForeColor = Color.Black,
+                Cursor = Cursors.Hand
+            };
+            logoutBtn.FlatAppearance.BorderSize = 0;
+            logoutBtn.Click += LogoutBtn_Click;
+
+            var closeBtn = new Button
+            {
+                Text = "  ✕  Fechar Sistema",
+                Font = new Font("Segoe UI", 11),
+                FlatStyle = FlatStyle.Flat,
+                Size = new Size(220, 44),
+                Location = new Point(10, y + 60),
                 TextAlign = ContentAlignment.MiddleLeft,
                 BackColor = Color.FromArgb(200, 50, 50),
                 ForeColor = Color.White,
-                Cursor = Cursors.Hand,
-                Anchor = AnchorStyles.Bottom | AnchorStyles.Left
+                Cursor = Cursors.Hand
             };
             closeBtn.FlatAppearance.BorderSize = 0;
             closeBtn.Click += (s, e) => Close();
 
-            _sidebarPanel.Controls.AddRange(new Control[] { logoBox, logoLabel, versionLabel, separator, closeBtn });
+            _sidebarPanel.Controls.AddRange(new Control[] { logoBox, logoLabel, versionLabel, separator, logoutBtn, closeBtn });
 
             _contentPanel = new Panel
             {
@@ -153,6 +186,21 @@ namespace ApacKiosk.Forms.Admin
 
             Controls.Add(_contentPanel);
             Controls.Add(_sidebarPanel);
+        }
+
+        private void LogoutBtn_Click(object sender, EventArgs e)
+        {
+            var result = KioskDialog.ShowMessage(
+                "Deseja sair do painel de administração e voltar à tela de login?",
+                "Sair / Logout", MessageBoxButtons.YesNo, MessageBoxIcon.Question, this);
+
+            if (result == DialogResult.Yes)
+            {
+                Program.Security?.SetKioskLock(true);
+                _db.InsertLog(null, "admin_logout", null, "Logout do administrador");
+                LogoutRequested = true;
+                Close();
+            }
         }
 
         private void NavButton_Click(object? sender, EventArgs e)
@@ -209,10 +257,10 @@ namespace ApacKiosk.Forms.Admin
             var hash = cmd.ExecuteScalar()?.ToString();
             if (hash != null && BCrypt.Net.BCrypt.Verify("APAC@Admin2024", hash))
             {
-                MessageBox.Show(
+                KioskDialog.ShowMessage(
                     "ATENÇÃO: A senha de administrador ainda é a padrão (APAC@Admin2024).\n\n" +
                     "Altere-a imediatamente em Sistema > Configurações do Sistema.",
-                    "Alerta de Segurança", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    "Alerta de Segurança", MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
             }
         }
 
@@ -233,88 +281,58 @@ namespace ApacKiosk.Forms.Admin
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            var pwdPrompt = new Form
-            {
-                Text = "Confirmação para Fechar",
-                Size = new Size(400, 200),
-                StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
-                BackColor = Color.FromArgb(22, 22, 45),
-                TopMost = true
-            };
+            LogTrace($"AdminDashboard.OnFormClosing chamado (CloseReason={e.CloseReason}, isReady={_isReady}, LogoutRequested={LogoutRequested})");
 
-            var lbl = new Label
+            if (!_isReady)
             {
-                Text = "Digite a senha de administrador para fechar:",
-                Font = new Font("Segoe UI", 11),
-                ForeColor = Color.White,
-                Location = new Point(20, 20),
-                AutoSize = true
-            };
+                LogTrace("AdminDashboard ainda nao esta pronto, ignorando fechamento");
+                e.Cancel = true;
+                return;
+            }
 
-            var txt = new TextBox
+            if (LogoutRequested)
             {
-                Location = new Point(20, 60),
-                Size = new Size(340, 30),
-                PasswordChar = '\u25CF',
-                Font = new Font("Segoe UI", 12),
-                BackColor = Color.FromArgb(26, 26, 46),
-                ForeColor = Color.White,
-                BorderStyle = BorderStyle.FixedSingle
-            };
+                LogTrace("AdminDashboard logout solicitado, fechando sem verificar senha");
+                base.OnFormClosing(e);
+                return;
+            }
 
-            var btnOk = new Button
-            {
-                Text = "Fechar",
-                Location = new Point(150, 110),
-                Size = new Size(100, 35),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(200, 50, 50),
-                ForeColor = Color.White,
-                Cursor = Cursors.Hand
-            };
-            btnOk.FlatAppearance.BorderSize = 0;
+            var (result, pwd) = KioskDialog.ShowPasswordPrompt(
+                "Digite a senha de administrador para fechar o sistema:",
+                "Confirmação para Fechar", this);
 
-            var btnCancel = new Button
-            {
-                Text = "Cancelar",
-                Location = new Point(260, 110),
-                Size = new Size(100, 35),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(42, 42, 70),
-                ForeColor = Color.White,
-                Cursor = Cursors.Hand,
-                DialogResult = DialogResult.Cancel
-            };
-            btnCancel.FlatAppearance.BorderSize = 0;
-
-            btnOk.Click += (s, args) =>
+            if (result == DialogResult.OK)
             {
                 using var conn = _db.GetConnection();
                 var cmd = conn.CreateCommand();
                 cmd.CommandText = "SELECT password_hash FROM admins WHERE username = 'admin'";
                 var hash = cmd.ExecuteScalar()?.ToString();
-                if (hash != null && BCrypt.Net.BCrypt.Verify(txt.Text, hash))
+                if (hash != null && BCrypt.Net.BCrypt.Verify(pwd, hash))
                 {
-                    pwdPrompt.DialogResult = DialogResult.OK;
-                    pwdPrompt.Close();
+                    LogTrace("AdminDashboard senha correta, fechando");
+                    _db.InsertLog(null, "admin_shutdown", null, "Sistema encerrado pelo administrador");
+                    base.OnFormClosing(e);
+                    return;
                 }
                 else
                 {
-                    MessageBox.Show("Senha inválida.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    KioskDialog.ShowMessage("Senha inválida.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
                 }
-            };
-
-            pwdPrompt.Controls.AddRange(new Control[] { lbl, txt, btnOk, btnCancel });
-            pwdPrompt.AcceptButton = btnOk;
-            pwdPrompt.CancelButton = btnCancel;
-
-            if (pwdPrompt.ShowDialog() != DialogResult.OK)
-            {
-                e.Cancel = true;
             }
 
+            LogTrace("AdminDashboard fechamento cancelado");
+            e.Cancel = true;
             base.OnFormClosing(e);
+        }
+
+        private static void LogTrace(string msg)
+        {
+            try
+            {
+                var logPath = Path.Combine(Path.GetTempPath(), "ApacKiosk_Trace.log");
+                File.AppendAllText(logPath, $"[{DateTime.Now:HH:mm:ss.fff}] {msg}\n");
+            }
+            catch { }
         }
     }
 }

@@ -13,6 +13,12 @@ namespace ApacKiosk.Utils
             _db = db;
         }
 
+        public bool IsFirstRun
+        {
+            get => _db.GetSetting("is_first_run", "true") == "true";
+            set => _db.SetSetting("is_first_run", value ? "true" : "false");
+        }
+
         public string DisplayName
         {
             get => _db.GetSetting("display_name", "APAC - Acesso Controlado");
@@ -49,10 +55,10 @@ namespace ApacKiosk.Utils
             set => _db.SetSetting("screenshot_quality", value);
         }
 
-        public string ScreenshotPath
+        public string BaseLogPath
         {
-            get => _db.GetSetting("screenshot_path", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "APAC", "Screenshots"));
-            set => _db.SetSetting("screenshot_path", value);
+            get => _db.GetSetting("base_log_path", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "APAC", "Logs"));
+            set => _db.SetSetting("base_log_path", value);
         }
 
         public bool CameraEnabled
@@ -73,11 +79,7 @@ namespace ApacKiosk.Utils
             set => _db.SetSetting("camera_quality", value);
         }
 
-        public string CameraPath
-        {
-            get => _db.GetSetting("camera_path", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "APAC", "Camera"));
-            set => _db.SetSetting("camera_path", value);
-        }
+
 
         public bool KeyloggerEnabled
         {
@@ -85,17 +87,7 @@ namespace ApacKiosk.Utils
             set => _db.SetSetting("keylogger_enabled", value ? "true" : "false");
         }
 
-        public string KeyloggerPath
-        {
-            get => _db.GetSetting("keylogger_path", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "APAC", "Keylogs"));
-            set => _db.SetSetting("keylogger_path", value);
-        }
 
-        public string KeyloggerFileMode
-        {
-            get => _db.GetSetting("keylogger_file_mode", "daily");
-            set => _db.SetSetting("keylogger_file_mode", value);
-        }
 
         public int LogRetentionDays
         {
@@ -115,10 +107,81 @@ namespace ApacKiosk.Utils
             set => _db.SetSetting("autostart_enabled", value ? "true" : "false");
         }
 
+        public string CameraDeviceName
+        {
+            get => _db.GetSetting("camera_device_name", "");
+            set => _db.SetSetting("camera_device_name", value);
+        }
+
         public int EmergencyDisableMinutes
         {
             get => int.TryParse(_db.GetSetting("emergency_disable_minutes", "0"), out var v) ? v : 0;
             set => _db.SetSetting("emergency_disable_minutes", value.ToString());
         }
+
+        public string KioskExePath
+        {
+            get => _db.GetSetting("kiosk_exe_path",
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ApacKiosk.exe"));
+            set => _db.SetSetting("kiosk_exe_path", value);
+        }
+
+        public int MonitorIntervalSec
+        {
+            get => int.TryParse(_db.GetSetting("monitor_interval_sec", "3"), out var v) ? v : 3;
+            set => _db.SetSetting("monitor_interval_sec", value.ToString());
+        }
+
+        public string LicenseSignature
+        {
+            get => _db.GetSetting("license_signature", "");
+            set => _db.SetSetting("license_signature", value);
+        }
+
+        public string TrialStartDate
+        {
+            get => _db.GetSetting("trial_start_date", "");
+            set => _db.SetSetting("trial_start_date", value);
+        }
+
+        public string LastCloudCheckin
+        {
+            get => _db.GetSetting("last_cloud_checkin", "");
+            set => _db.SetSetting("last_cloud_checkin", value);
+        }
+
+        public string UnitState
+        {
+            get => _db.GetSetting("unit_state", "");
+            set => _db.SetSetting("unit_state", value);
+        }
+
+        public string UnitCity
+        {
+            get => _db.GetSetting("unit_city", "");
+            set => _db.SetSetting("unit_city", value);
+        }
+
+        public string UnitGender
+        {
+            get => _db.GetSetting("unit_gender", "");
+            set => _db.SetSetting("unit_gender", value);
+        }
+
+        public string ContactEmail
+        {
+            get => _db.GetSetting("contact_email", "");
+            set => _db.SetSetting("contact_email", value);
+        }
+
+        public string ContactName
+        {
+            get => _db.GetSetting("contact_name", "");
+            set => _db.SetSetting("contact_name", value);
+        }
+
+        public string GetSetting(string key, string defaultValue) => _db.GetSetting(key, defaultValue);
+
+        public void SetSetting(string key, string value) => _db.SetSetting(key, value);
     }
 }

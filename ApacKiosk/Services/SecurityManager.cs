@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using ApacKiosk.Database;
+using ApacKiosk.Interop;
 
 namespace ApacKiosk.Services
 {
@@ -13,10 +14,21 @@ namespace ApacKiosk.Services
         private readonly DatabaseManager _db;
         private Thread _watchdogThread;
         private Thread _windowProtectorThread;
+        private Thread _registryProtectorThread;
+        private Thread _hookThread;
         private volatile bool _isRunning;
+        private volatile bool _isHookRunning;
+        private volatile bool _windowProtectorPaused;
         private IntPtr _mainWindowHandle;
+        private IntPtr _hookHandle = IntPtr.Zero;
+        private NativeMethods.LowLevelKeyboardProc _hookProc;
         private bool _isKioskLocked = true;
         private readonly List<Process> _killedProcesses = new List<Process>();
+        private readonly HashSet<int> _allowedProcessIds = new HashSet<int>();
+        private readonly HashSet<string> _allowedProcessNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly object _lockAllowedPids = new object();
+
+        private const int LLKHF_ALTDOWN = 0x20;
 
         private static readonly string[] ProhibitedProcesses = new[]
         {
@@ -40,42 +52,97 @@ namespace ApacKiosk.Services
 
         public void EnableAllSecurity()
         {
+            if (_isRunning) return;
             _isRunning = true;
+            HideTaskbar();
             EnableHotkeyBlock();
             EnableWatchdog();
             EnableWindowProtector();
             EnableRegistryProtector();
+            SetupCtrlAltDelPolicy();
         }
 
         public void DisableAllSecurity()
         {
             _isRunning = false;
-            UnregisterHotKeys();
+            RestoreTaskbar();
+            StopHook();
         }
 
         private void EnableHotkeyBlock()
         {
-            var thread = new Thread(() =>
+            if (_isHookRunning) return;
+            _isHookRunning = true;
+            _hookProc = HookCallback;
+            _hookThread = new Thread(() =>
             {
-                while (_isRunning)
-                {
-                    try
-                    {
-                        BlockWinKey();
-                        BlockAltF4();
-                        BlockAltTab();
-                        BlockCtrlEsc();
-                    }
-                    catch { }
-                    Thread.Sleep(200);
-                }
+                _hookHandle = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _hookProc,
+                    NativeMethods.GetModuleHandle(null), 0);
+                System.Windows.Forms.Application.Run();
             })
-            { IsBackground = true, Name = "HotkeyBlocker" };
-            thread.Start();
+            { IsBackground = true, Name = "KeyboardHook", ApartmentState = ApartmentState.STA };
+            _hookThread.Start();
+        }
+
+        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && _isKioskLocked)
+            {
+                var hookStruct = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
+                var vkCode = (int)hookStruct.vkCode;
+                var flags = hookStruct.flags;
+                var isAltDown = (flags & LLKHF_ALTDOWN) != 0;
+
+                if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN || wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
+                {
+                    if (vkCode == NativeMethods.VK_LWIN || vkCode == NativeMethods.VK_RWIN)
+                        return (IntPtr)1;
+
+                    if (vkCode == NativeMethods.VK_TAB && isAltDown)
+                        return (IntPtr)1;
+
+                    if (vkCode == NativeMethods.VK_ESCAPE && isAltDown)
+                        return (IntPtr)1;
+
+                    if (vkCode == NativeMethods.VK_ESCAPE && (NativeMethods.GetAsyncKeyState(NativeMethods.VK_CONTROL) & 0x8000) != 0)
+                        return (IntPtr)1;
+
+                    if (vkCode == NativeMethods.VK_F4 && isAltDown)
+                        return (IntPtr)1;
+                }
+            }
+            return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
+        }
+
+        private void StopHook()
+        {
+            _isHookRunning = false;
+            if (_hookHandle != IntPtr.Zero)
+            {
+                NativeMethods.UnhookWindowsHookEx(_hookHandle);
+                _hookHandle = IntPtr.Zero;
+            }
+            try { System.Windows.Forms.Application.Exit(); } catch { }
+        }
+
+        private void SetupCtrlAltDelPolicy()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\System");
+                key?.SetValue("DisableTaskMgr", 1, Microsoft.Win32.RegistryValueKind.DWord);
+
+                using var explorerKey = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer");
+                explorerKey?.SetValue("NoClose", 1, Microsoft.Win32.RegistryValueKind.DWord);
+            }
+            catch { }
         }
 
         private void EnableWatchdog()
         {
+            if (_watchdogThread != null && _watchdogThread.IsAlive) return;
             _watchdogThread = new Thread(() =>
             {
                 while (_isRunning)
@@ -91,6 +158,10 @@ namespace ApacKiosk.Services
                                 {
                                     if (!proc.HasExited)
                                     {
+                                        lock (_lockAllowedPids)
+                                        {
+                                            if (_allowedProcessIds.Contains(proc.Id)) continue;
+                                        }
                                         proc.Kill();
                                         _db.InsertLog(null, "system_event", null,
                                             $"Processo bloqueado: {procName} (PID {proc.Id})");
@@ -110,18 +181,26 @@ namespace ApacKiosk.Services
 
         private void EnableWindowProtector()
         {
+            if (_windowProtectorThread != null && _windowProtectorThread.IsAlive) return;
             _windowProtectorThread = new Thread(() =>
             {
                 while (_isRunning)
                 {
                     try
                     {
-                        if (_mainWindowHandle != IntPtr.Zero)
+                        if (_mainWindowHandle != IntPtr.Zero && !_windowProtectorPaused)
                         {
-                            SetWindowPosTopMost(_mainWindowHandle);
-                            var fgWnd = GetForegroundWindow();
-                            if (fgWnd != _mainWindowHandle && fgWnd != IntPtr.Zero)
+                            if (!IsIconic(_mainWindowHandle))
                             {
+                                SetWindowPosTopMost(_mainWindowHandle);
+                            }
+
+                            var fgWnd = GetForegroundWindow();
+                            if (fgWnd != _mainWindowHandle && fgWnd != IntPtr.Zero && !IsAllowedForegroundWindow(fgWnd))
+                            {
+                                if (IsIconic(_mainWindowHandle))
+                                    ShowWindow(_mainWindowHandle, SW_RESTORE);
+                                SetWindowPosTopMost(_mainWindowHandle);
                                 BringWindowToFront(_mainWindowHandle);
                                 SetFocus(_mainWindowHandle);
                             }
@@ -135,9 +214,43 @@ namespace ApacKiosk.Services
             _windowProtectorThread.Start();
         }
 
+        private bool IsAllowedForegroundWindow(IntPtr hWnd)
+        {
+            NativeMethods.GetWindowThreadProcessId(hWnd, out uint pid);
+
+            lock (_lockAllowedPids)
+            {
+                if (_allowedProcessIds.Count == 0 && _allowedProcessNames.Count == 0) return false;
+                if (_allowedProcessIds.Contains((int)pid)) return true;
+            }
+
+            string procName = null;
+            try
+            {
+                using var proc = Process.GetProcessById((int)pid);
+                procName = proc.ProcessName;
+            }
+            catch { }
+
+            if (!string.IsNullOrEmpty(procName))
+            {
+                lock (_lockAllowedPids)
+                {
+                    if (_allowedProcessNames.Contains(procName))
+                    {
+                        _allowedProcessIds.Add((int)pid); // Cache it
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+
         private void EnableRegistryProtector()
         {
-            var thread = new Thread(() =>
+            if (_registryProtectorThread != null && _registryProtectorThread.IsAlive) return;
+            _registryProtectorThread = new Thread(() =>
             {
                 var autoStartPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
                 var appName = "APAC_Kiosk";
@@ -162,7 +275,51 @@ namespace ApacKiosk.Services
                 }
             })
             { IsBackground = true, Name = "RegistryProtector" };
-            thread.Start();
+            _registryProtectorThread.Start();
+        }
+
+        public void PauseWindowProtector()
+        {
+            _windowProtectorPaused = true;
+        }
+
+        public void ResumeWindowProtector()
+        {
+            _windowProtectorPaused = false;
+        }
+
+        public void RegisterAllowedProcess(int pid)
+        {
+            lock (_lockAllowedPids)
+            {
+                _allowedProcessIds.Add(pid);
+            }
+        }
+
+        public void RegisterAllowedProcessName(string processName)
+        {
+            if (string.IsNullOrEmpty(processName)) return;
+            lock (_lockAllowedPids)
+            {
+                _allowedProcessNames.Add(processName);
+            }
+        }
+
+        public void UnregisterAllowedProcess(int pid)
+        {
+            lock (_lockAllowedPids)
+            {
+                _allowedProcessIds.Remove(pid);
+            }
+        }
+
+        public void UnregisterAllowedProcessName(string processName)
+        {
+            if (string.IsNullOrEmpty(processName)) return;
+            lock (_lockAllowedPids)
+            {
+                _allowedProcessNames.Remove(processName);
+            }
         }
 
         public void SetKioskLock(bool locked)
@@ -170,10 +327,138 @@ namespace ApacKiosk.Services
             _isKioskLocked = locked;
         }
 
-        #region Win32 P/Invoke
+        public bool IsShellReplacement()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon");
+                var shell = key?.GetValue("Shell") as string;
+                return shell != null && shell.Contains("ApacKiosk", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
 
-        [DllImport("user32.dll")]
-        private static extern bool BlockInput(bool fBlockIt);
+        public void SetupShellReplacement(string kioskExePath)
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon");
+                key.SetValue("Shell", kioskExePath, Microsoft.Win32.RegistryValueKind.String);
+            }
+            catch { }
+        }
+
+        public void RemoveShellReplacement()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", writable: true);
+                if (key != null)
+                {
+                    key.DeleteValue("Shell", throwOnMissingValue: false);
+                }
+            }
+            catch { }
+        }
+
+        private void HideTaskbar()
+        {
+            try
+            {
+                var taskbar = FindWindow("Shell_TrayWnd", null);
+                if (taskbar != IntPtr.Zero)
+                    ShowWindow(taskbar, SW_HIDE);
+
+                var startButton = FindWindow("Button", "Start");
+                if (startButton == IntPtr.Zero)
+                    startButton = FindWindow("Start", null);
+                if (startButton != IntPtr.Zero)
+                    ShowWindow(startButton, SW_HIDE);
+
+                HideDesktopIcons();
+            }
+            catch { }
+        }
+
+        private void RestoreTaskbar()
+        {
+            try
+            {
+                var taskbar = FindWindow("Shell_TrayWnd", null);
+                if (taskbar != IntPtr.Zero)
+                    ShowWindow(taskbar, SW_SHOW);
+
+                ShowDesktopIcons();
+            }
+            catch { }
+        }
+
+        private void HideDesktopIcons()
+        {
+            try
+            {
+                var progman = FindWindow("Progman", null);
+                if (progman != IntPtr.Zero)
+                {
+                    var defView = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+                    if (defView != IntPtr.Zero)
+                    {
+                        var listView = FindWindowEx(defView, IntPtr.Zero, "SysListView32", null);
+                        if (listView != IntPtr.Zero)
+                            ShowWindow(listView, SW_HIDE);
+                    }
+                }
+
+                var workerW = IntPtr.Zero;
+                while ((workerW = FindWindowEx(IntPtr.Zero, workerW, "WorkerW", null)) != IntPtr.Zero)
+                {
+                    var defView2 = FindWindowEx(workerW, IntPtr.Zero, "SHELLDLL_DefView", null);
+                    if (defView2 != IntPtr.Zero)
+                    {
+                        var listView2 = FindWindowEx(defView2, IntPtr.Zero, "SysListView32", null);
+                        if (listView2 != IntPtr.Zero)
+                            ShowWindow(listView2, SW_HIDE);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ShowDesktopIcons()
+        {
+            try
+            {
+                var progman = FindWindow("Progman", null);
+                if (progman != IntPtr.Zero)
+                {
+                    var defView = FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+                    if (defView != IntPtr.Zero)
+                    {
+                        var listView = FindWindowEx(defView, IntPtr.Zero, "SysListView32", null);
+                        if (listView != IntPtr.Zero)
+                            ShowWindow(listView, SW_SHOW);
+                    }
+                }
+
+                var workerW = IntPtr.Zero;
+                while ((workerW = FindWindowEx(IntPtr.Zero, workerW, "WorkerW", null)) != IntPtr.Zero)
+                {
+                    var defView2 = FindWindowEx(workerW, IntPtr.Zero, "SHELLDLL_DefView", null);
+                    if (defView2 != IntPtr.Zero)
+                    {
+                        var listView2 = FindWindowEx(defView2, IntPtr.Zero, "SysListView32", null);
+                        if (listView2 != IntPtr.Zero)
+                            ShowWindow(listView2, SW_SHOW);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        #region Win32 P/Invoke
 
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
@@ -187,6 +472,22 @@ namespace ApacKiosk.Services
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr FindWindowEx(IntPtr hWndParent, IntPtr hWndChildAfter, string lpszClass, string lpszWindow);
+
+        private const int SW_RESTORE = 9;
+        private const int SW_HIDE = 0;
+        private const int SW_SHOW = 5;
+
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private const uint SWP_NOMOVE = 2;
         private const uint SWP_NOSIZE = 1;
@@ -197,68 +498,13 @@ namespace ApacKiosk.Services
             SetWindowPos(hWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         }
 
-        [DllImport("user32.dll")]
-        private static extern short GetAsyncKeyState(int vKey);
-
-        [DllImport("user32.dll")]
-        private static extern uint keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
-
-        private const byte VK_LWIN = 0x5B;
-        private const byte VK_RWIN = 0x5C;
-        private const byte VK_MENU = 0x12;
-        private const byte VK_CONTROL = 0x11;
-        private const byte VK_ESCAPE = 0x1B;
-        private const byte VK_TAB = 0x09;
-        private const byte VK_F4 = 0x73;
-        private const byte VK_F11 = 0x7A;
-        private const uint KEYEVENTF_KEYUP = 0x2;
-
-        private void BlockWinKey()
-        {
-            if (_isKioskLocked && (GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0))
-            {
-                keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                keybd_event(VK_RWIN, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            }
-        }
-
-        private void BlockAltF4()
-        {
-            if (_isKioskLocked && GetAsyncKeyState(VK_MENU) < 0 && GetAsyncKeyState(VK_F4) < 0)
-            {
-                keybd_event(VK_F4, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            }
-        }
-
-        private void BlockAltTab()
-        {
-            if (_isKioskLocked && GetAsyncKeyState(VK_MENU) < 0 && GetAsyncKeyState(VK_TAB) < 0)
-            {
-                keybd_event(VK_TAB, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            }
-        }
-
-        private void BlockCtrlEsc()
-        {
-            if (_isKioskLocked && GetAsyncKeyState(VK_CONTROL) < 0 && GetAsyncKeyState(VK_ESCAPE) < 0)
-            {
-                keybd_event(VK_ESCAPE, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-                keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, UIntPtr.Zero);
-            }
-        }
-
-        private void UnregisterHotKeys()
-        {
-            _isKioskLocked = false;
-        }
-
         #endregion
 
         public void Dispose()
         {
             _isRunning = false;
+            RestoreTaskbar();
+            StopHook();
         }
     }
 }

@@ -2,6 +2,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 using ApacKiosk.Database;
+using ApacKiosk.Services;
 using ApacKiosk.Utils;
 
 namespace ApacKiosk.Forms.Admin
@@ -14,19 +15,17 @@ namespace ApacKiosk.Forms.Admin
         private CheckBox _chkScreenshotEnabled;
         private NumericUpDown _numScreenshotInterval;
         private ComboBox _cmbScreenshotQuality;
-        private TextBox _txtScreenshotPath;
-        private Button _btnBrowseScreenshot;
+        private TextBox _txtBaseLogPath;
+        private Button _btnBrowseBaseLog;
 
         private CheckBox _chkCameraEnabled;
         private NumericUpDown _numCameraInterval;
         private ComboBox _cmbCameraQuality;
-        private TextBox _txtCameraPath;
-        private Button _btnBrowseCamera;
+        private ComboBox _cmbCameraDevice;
+        private Button _btnTestCamera;
+        private PictureBox _cameraPreview;
 
         private CheckBox _chkKeyloggerEnabled;
-        private TextBox _txtKeyloggerPath;
-        private Button _btnBrowseKeylogger;
-        private ComboBox _cmbKeyloggerMode;
 
         private NumericUpDown _numRetentionDays;
         private NumericUpDown _numMaxSizeGb;
@@ -46,36 +45,65 @@ namespace ApacKiosk.Forms.Admin
         {
             int y = 10;
 
+            y = AddSectionLabel("📂 Diretório Base de Armazenamento", y);
+            _txtBaseLogPath = AddPathWithBrowse("Pasta base para arquivos (Logs, Prints e Câmera):", ref y, out _btnBrowseBaseLog, "Logs");
+            _btnBrowseBaseLog.Click += (s, e) => BrowseFolder(_txtBaseLogPath);
+            y += 10;
+
             y = AddSectionLabel("📸 Screenshots", y);
             _chkScreenshotEnabled = AddCheckbox("Ativar captura de tela", ref y);
             _numScreenshotInterval = AddNumericWithLabel("Intervalo (segundos, mín. 10):", ref y, 10, 3600);
             _cmbScreenshotQuality = AddComboWithLabel("Qualidade:", ref y, new[] { "Baixa", "Média", "Alta" });
-            _txtScreenshotPath = AddPathWithBrowse("Pasta de destino:", ref y, out _btnBrowseScreenshot, "Screenshots");
-            _btnBrowseScreenshot.Click += (s, e) => BrowseFolder(_txtScreenshotPath);
 
             y += 10;
+            int yCameraStart = y;
             y = AddSectionLabel("📷 Câmera", y);
             _chkCameraEnabled = AddCheckbox("Ativar captura de câmera", ref y);
             _numCameraInterval = AddNumericWithLabel("Intervalo (segundos, mín. 30):", ref y, 30, 3600);
             _cmbCameraQuality = AddComboWithLabel("Qualidade:", ref y, new[] { "Baixa", "Média", "Alta" });
-            _txtCameraPath = AddPathWithBrowse("Pasta de destino:", ref y, out _btnBrowseCamera, "Camera");
-            _btnBrowseCamera.Click += (s, e) => BrowseFolder(_txtCameraPath);
+            _cmbCameraDevice = AddComboWithLabel("Dispositivo de Câmera:", ref y, CameraCapture.GetCameraDevices());
+
+            _btnTestCamera = new Button
+            {
+                Text = "🔍 Testar Câmera",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                Size = new Size(160, 32),
+                Location = new Point(450, y),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(59, 130, 246),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand
+            };
+            _btnTestCamera.FlatAppearance.BorderSize = 0;
+            _btnTestCamera.Click += (s, e) => TestCamera();
+            Controls.Add(_btnTestCamera);
+            y += 45;
+
+            _cameraPreview = new PictureBox
+            {
+                Size = new Size(240, 180),
+                Location = new Point(660, yCameraStart + 35),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.FromArgb(26, 26, 46),
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            Controls.Add(_cameraPreview);
+            
+            int previewBottom = _cameraPreview.Bottom + 20;
+            if (y < previewBottom) y = previewBottom;
 
             y += 10;
             y = AddSectionLabel("⌨ Keylogger", y);
             _chkKeyloggerEnabled = AddCheckbox("Ativar keylogger", ref y);
-            _txtKeyloggerPath = AddPathWithBrowse("Pasta de destino:", ref y, out _btnBrowseKeylogger, "Keylogs");
-            _btnBrowseKeylogger.Click += (s, e) => BrowseFolder(_txtKeyloggerPath);
-            _cmbKeyloggerMode = AddComboWithLabel("Modo de arquivo:", ref y, new[] { "Diário (um arquivo por dia)", "Por Sessão (um arquivo por login)" });
 
             y += 20;
-            var sepLine = new Panel { Location = new Point(0, y), Size = new Size(600, 2), BackColor = Color.FromArgb(50, 50, 80) };
+            var sepLine = new Panel { Location = new Point(0, y), Size = new Size(1000, 2), BackColor = Color.FromArgb(50, 50, 80) };
             Controls.Add(sepLine);
             y += 20;
 
-            y = AddSectionLabel("⚙ Retenção de Logs", y);
-            _numRetentionDays = AddNumericWithLabel("Manter logs por (dias):", ref y, 1, 365);
-            _numMaxSizeGb = AddNumericWithLabel("Tamanho máximo da pasta de logs (GB):", ref y, 1, 500);
+            y = AddSectionLabel("⚙ Retenção de Dados", y);
+            _numRetentionDays = AddNumericWithLabel("Manter arquivos por (dias):", ref y, 1, 365);
+            _numMaxSizeGb = AddNumericWithLabel("Tamanho máximo da pasta (GB):", ref y, 1, 500);
 
             var storageInfo = new Label
             {
@@ -139,14 +167,14 @@ namespace ApacKiosk.Forms.Admin
             };
             var num = new NumericUpDown
             {
-                Location = new Point(350, y), Size = new Size(80, 28),
+                Location = new Point(450, y), Size = new Size(80, 28),
                 Minimum = min, Maximum = max, Font = new Font("Segoe UI", 10),
                 BackColor = Color.FromArgb(26, 26, 46), ForeColor = Color.White,
                 BorderStyle = BorderStyle.FixedSingle
             };
             Controls.Add(lbl);
             Controls.Add(num);
-            y += 35;
+            y += 40;
             return num;
         }
 
@@ -160,7 +188,7 @@ namespace ApacKiosk.Forms.Admin
             };
             var cmb = new ComboBox
             {
-                Location = new Point(350, y), Size = new Size(180, 28),
+                Location = new Point(450, y), Size = new Size(180, 28),
                 DropDownStyle = ComboBoxStyle.DropDownList, Font = new Font("Segoe UI", 10),
                 FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(26, 26, 46),
                 ForeColor = Color.White
@@ -168,7 +196,7 @@ namespace ApacKiosk.Forms.Admin
             cmb.Items.AddRange(items);
             Controls.Add(lbl);
             Controls.Add(cmb);
-            y += 35;
+            y += 40;
             return cmb;
         }
 
@@ -182,13 +210,13 @@ namespace ApacKiosk.Forms.Admin
             };
             var txt = new TextBox
             {
-                Location = new Point(350, y), Size = new Size(320, 28),
+                Location = new Point(450, y), Size = new Size(320, 28),
                 Font = new Font("Segoe UI", 9), BackColor = Color.FromArgb(26, 26, 46),
                 ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, ReadOnly = true
             };
             browseBtn = new Button
             {
-                Text = "...", Location = new Point(680, y), Size = new Size(35, 28),
+                Text = "...", Location = new Point(780, y), Size = new Size(35, 28),
                 FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(59, 130, 246),
                 ForeColor = Color.White, Cursor = Cursors.Hand
             };
@@ -196,14 +224,14 @@ namespace ApacKiosk.Forms.Admin
             Controls.Add(lbl);
             Controls.Add(txt);
             Controls.Add(browseBtn);
-            y += 35;
+            y += 40;
             return txt;
         }
 
         private void BrowseFolder(TextBox target)
         {
             using var fbd = new FolderBrowserDialog { Description = "Selecione a pasta de destino" };
-            if (fbd.ShowDialog() == DialogResult.OK)
+            if (fbd.ShowDialog(this.FindForm()) == DialogResult.OK)
                 target.Text = fbd.SelectedPath;
         }
 
@@ -215,7 +243,7 @@ namespace ApacKiosk.Forms.Admin
             {
                 "Low" => "Baixa", "High" => "Alta", _ => "Média"
             };
-            _txtScreenshotPath.Text = _config.ScreenshotPath;
+            _txtBaseLogPath.Text = _config.BaseLogPath;
 
             _chkCameraEnabled.Checked = _config.CameraEnabled;
             _numCameraInterval.Value = _config.CameraIntervalSec;
@@ -223,11 +251,21 @@ namespace ApacKiosk.Forms.Admin
             {
                 "Low" => "Baixa", "High" => "Alta", _ => "Média"
             };
-            _txtCameraPath.Text = _config.CameraPath;
+
+
+            var devices = CameraCapture.GetCameraDevices();
+            if (!string.IsNullOrEmpty(_config.CameraDeviceName) && devices.Length > 0)
+            {
+                var idx = Array.IndexOf(devices, _config.CameraDeviceName);
+                if (idx >= 0) _cmbCameraDevice.SelectedIndex = idx;
+                else if (_cmbCameraDevice.Items.Count > 0) _cmbCameraDevice.SelectedIndex = 0;
+            }
+            else if (_cmbCameraDevice.Items.Count > 0)
+            {
+                _cmbCameraDevice.SelectedIndex = 0;
+            }
 
             _chkKeyloggerEnabled.Checked = _config.KeyloggerEnabled;
-            _txtKeyloggerPath.Text = _config.KeyloggerPath;
-            _cmbKeyloggerMode.Text = _config.KeyloggerFileMode == "session" ? "Por Sessão (um arquivo por login)" : "Diário (um arquivo por dia)";
 
             _numRetentionDays.Value = _config.LogRetentionDays;
             _numMaxSizeGb.Value = (decimal)_config.LogMaxSizeGb;
@@ -241,7 +279,7 @@ namespace ApacKiosk.Forms.Admin
             {
                 "Baixa" => "Low", "Alta" => "High", _ => "Medium"
             };
-            _config.ScreenshotPath = _txtScreenshotPath.Text;
+            _config.BaseLogPath = _txtBaseLogPath.Text;
 
             _config.CameraEnabled = _chkCameraEnabled.Checked;
             _config.CameraIntervalSec = (int)_numCameraInterval.Value;
@@ -249,18 +287,64 @@ namespace ApacKiosk.Forms.Admin
             {
                 "Baixa" => "Low", "Alta" => "High", _ => "Medium"
             };
-            _config.CameraPath = _txtCameraPath.Text;
+            _config.CameraDeviceName = _cmbCameraDevice.SelectedItem?.ToString() ?? "";
 
             _config.KeyloggerEnabled = _chkKeyloggerEnabled.Checked;
-            _config.KeyloggerPath = _txtKeyloggerPath.Text;
-            _config.KeyloggerFileMode = _cmbKeyloggerMode.SelectedIndex == 1 ? "session" : "daily";
 
             _config.LogRetentionDays = (int)_numRetentionDays.Value;
             _config.LogMaxSizeGb = (double)_numMaxSizeGb.Value;
 
             _db.InsertLog(null, "event", null, "Configurações de monitoramento atualizadas");
 
-            MessageBox.Show("Configurações salvas com sucesso!", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            KioskDialog.ShowMessage("Configurações salvas com sucesso!", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
+        }
+
+        private void TestCamera()
+        {
+            _cameraPreview.Image = null;
+            _btnTestCamera.Enabled = false;
+            _btnTestCamera.Text = "⏳ Testando...";
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    if (!string.IsNullOrEmpty(_cmbCameraDevice.SelectedItem?.ToString()))
+                    {
+                        _config.CameraDeviceName = _cmbCameraDevice.SelectedItem.ToString();
+                    }
+
+                    var tempCapture = new CameraCapture(_config, _db);
+                    var frame = tempCapture.TestCameraFrame();
+
+                    _btnTestCamera.BeginInvoke((Action)(() =>
+                    {
+                        _btnTestCamera.Enabled = true;
+                        _btnTestCamera.Text = "🔍 Testar Câmera";
+                        if (frame != null)
+                        {
+                            _cameraPreview.Image = frame;
+                        }
+                        else
+                        {
+                            KioskDialog.ShowMessage(
+                                "Não foi possível capturar da câmera.\nVerifique se a câmera está conectada e funcionando.",
+                                _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
+                        }
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    _btnTestCamera.BeginInvoke((Action)(() =>
+                    {
+                        _btnTestCamera.Enabled = true;
+                        _btnTestCamera.Text = "🔍 Testar Câmera";
+                        KioskDialog.ShowMessage(
+                            $"Erro ao testar câmera:\n{ex.Message}",
+                            _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
+                    }));
+                }
+            });
         }
 
         private string GetStorageInfo()
@@ -269,7 +353,7 @@ namespace ApacKiosk.Forms.Admin
             var gb = size / (1024.0 * 1024 * 1024);
             var maxGb = _config.LogMaxSizeGb;
             var percent = maxGb > 0 ? (gb / maxGb * 100) : 0;
-            return $"Armazenamento de logs: {gb:F2} GB de {maxGb:F0} GB ({percent:F0}%)";
+            return $"Armazenamento Total (Sessões/Logs): {gb:F2} GB de {maxGb:F0} GB ({percent:F0}%)";
         }
     }
 }

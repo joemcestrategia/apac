@@ -47,6 +47,7 @@ namespace ApacKiosk.Models
         public int Id { get; set; }
         public int? ProfileId { get; set; }
         public string UrlPattern { get; set; }
+        public string IconPath { get; set; }
         public bool IsGlobal { get; set; }
         public DateTime CreatedAt { get; set; }
     }

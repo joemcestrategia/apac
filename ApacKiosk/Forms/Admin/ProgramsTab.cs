@@ -82,6 +82,7 @@ namespace ApacKiosk.Forms.Admin
             _grid.Columns.Add("Name", "Nome");
             _grid.Columns.Add("Path", "Caminho");
             _grid.Columns.Add("Args", "Argumentos");
+            _grid.Columns.Add("Icon", "Ícone");
             _grid.Columns.Add("Profile", "Perfil");
             _grid.Columns.Add("Global", "Global");
 
@@ -111,7 +112,7 @@ namespace ApacKiosk.Forms.Admin
                 foreach (var p in programs)
                 {
                     var profileName = p.IsGlobal ? "Global" : (_profileService.GetAll().FirstOrDefault(x => x.Id == p.ProfileId)?.Name ?? "-");
-                    _grid.Rows.Add(p.Id, p.Name, p.ExecutablePath, p.Arguments ?? "", profileName, p.IsGlobal ? "Sim" : "Não");
+                    _grid.Rows.Add(p.Id, p.Name, p.ExecutablePath, p.Arguments ?? "", string.IsNullOrEmpty(p.IconPath) ? "(padrão)" : Path.GetFileName(p.IconPath), profileName, p.IsGlobal ? "Sim" : "Não");
                 }
             }
             catch { }
@@ -121,20 +122,30 @@ namespace ApacKiosk.Forms.Admin
         {
             var form = new Form
             {
-                Text = "Adicionar Programa", Size = new Size(520, 320),
+                Text = "Adicionar Programa", Size = new Size(520, 400),
                 StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
-                BackColor = Color.FromArgb(22, 22, 45), MaximizeBox = false, MinimizeBox = false
+                BackColor = Color.FromArgb(22, 22, 45), MaximizeBox = false, MinimizeBox = false, TopMost = true
             };
+            form.Owner = this.FindForm() as Form;
 
             var y = 15;
             var txtName = AddField(form, "Nome do Programa:", ref y);
             var txtPath = AddField(form, "Caminho do Executável:", ref y);
             var btnBrowseExe = new Button { Text = "Procurar", Location = new Point(380, y - 30), Size = new Size(100, 28), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand };
             btnBrowseExe.FlatAppearance.BorderSize = 0;
-            btnBrowseExe.Click += (s, e) => { using var ofd = new OpenFileDialog { Filter = "Executáveis|*.exe" }; if (ofd.ShowDialog() == DialogResult.OK) txtPath.Text = ofd.FileName; };
+            btnBrowseExe.Click += (s, e) => { using var ofd = new OpenFileDialog { Filter = "Executáveis|*.exe" }; if (ofd.ShowDialog(this.FindForm()) == DialogResult.OK) txtPath.Text = ofd.FileName; };
             form.Controls.Add(btnBrowseExe);
 
             var txtArgs = AddField(form, "Argumentos (opcional):", ref y);
+
+            var lblIcon = new Label { Text = "Ícone personalizado (opcional):", Font = new Font("Segoe UI", 10, FontStyle.Bold), ForeColor = Color.FromArgb(200, 200, 220), Location = new Point(20, y), AutoSize = true };
+            y += 25;
+            var txtIconPath = new TextBox { Location = new Point(20, y), Size = new Size(350, 28), Font = new Font("Segoe UI", 10), BackColor = Color.FromArgb(26, 26, 46), ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle, ReadOnly = true };
+            var btnBrowseIcon = new Button { Text = "Procurar", Location = new Point(380, y), Size = new Size(100, 28), FlatStyle = FlatStyle.Flat, BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand };
+            btnBrowseIcon.FlatAppearance.BorderSize = 0;
+            btnBrowseIcon.Click += (s, e) => { using var ofd = new OpenFileDialog { Filter = "Imagens|*.png;*.ico;*.jpg;*.jpeg;*.bmp", Title = "Selecionar ícone" }; if (ofd.ShowDialog(this.FindForm()) == DialogResult.OK) txtIconPath.Text = ofd.FileName; };
+            form.Controls.AddRange(new Control[] { lblIcon, txtIconPath, btnBrowseIcon });
+            y += 45;
 
             var lblProfile = new Label { Text = "Perfil:", Font = new Font("Segoe UI", 10, FontStyle.Bold), ForeColor = Color.FromArgb(200, 200, 220), Location = new Point(20, y), AutoSize = true };
             y += 25;
@@ -150,26 +161,27 @@ namespace ApacKiosk.Forms.Admin
             btnSave.Click += (s, e) =>
             {
                 if (string.IsNullOrWhiteSpace(txtName.Text) || string.IsNullOrWhiteSpace(txtPath.Text))
-                { MessageBox.Show("Preencha Nome e Caminho.", _config.DisplayName); return; }
+                { KioskDialog.ShowMessage("Preencha Nome e Caminho.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this); return; }
                 var prof = (cmbProfile.SelectedItem as ComboItem<int?>)?.Value;
                 _programService.Add(txtName.Text.Trim(), txtPath.Text.Trim(),
                     string.IsNullOrWhiteSpace(txtArgs.Text) ? null : txtArgs.Text.Trim(),
-                    prof, !prof.HasValue);
+                    prof, !prof.HasValue,
+                    string.IsNullOrWhiteSpace(txtIconPath.Text) ? null : txtIconPath.Text.Trim());
                 _db.InsertLog(null, "event", null, $"Programa adicionado: {txtName.Text}");
                 form.Close();
                 RefreshList();
             };
 
             form.Controls.AddRange(new Control[] { txtName, txtPath, txtArgs, lblProfile, cmbProfile, btnSave });
-            form.ShowDialog();
+            form.ShowDialog(this.FindForm());
         }
 
         private void DeleteProgram()
         {
-            if (_grid.SelectedRows.Count == 0) { MessageBox.Show("Selecione um programa.", _config.DisplayName); return; }
+            if (_grid.SelectedRows.Count == 0) { KioskDialog.ShowMessage("Selecione um programa.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this); return; }
             var id = Convert.ToInt32(_grid.SelectedRows[0].Cells[0].Value);
             var name = _grid.SelectedRows[0].Cells[1].Value.ToString();
-            if (MessageBox.Show($"Remover \"{name}\"?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+            if (KioskDialog.ShowMessage($"Remover \"{name}\"?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Question, this) == DialogResult.Yes)
             {
                 _programService.Delete(id);
                 _db.InsertLog(null, "event", null, $"Programa removido: {name}");
@@ -184,6 +196,7 @@ namespace ApacKiosk.Forms.Admin
             var txt = new TextBox { Location = new Point(20, y), Size = new Size(350, 28), Font = new Font("Segoe UI", 10), BackColor = Color.FromArgb(26, 26, 46), ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
             y += 35;
             form.Controls.Add(lbl);
+            form.Controls.Add(txt);
             return txt;
         }
 

@@ -18,6 +18,15 @@ namespace ApacKiosk.Services
             Keylog = keylogger;
         }
 
+        public void SetSessionInfo(int userId, string username)
+        {
+            _currentUserId = userId;
+            var sessionTimestamp = System.DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            Screenshot.SetSessionInfo(userId, username, sessionTimestamp);
+            Camera.SetSessionInfo(userId, username, sessionTimestamp);
+            Keylog.SetSessionInfo(userId, username, sessionTimestamp);
+        }
+
         public void SetCurrentUser(int? userId)
         {
             _currentUserId = userId;

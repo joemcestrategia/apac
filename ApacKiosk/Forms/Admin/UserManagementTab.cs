@@ -78,7 +78,7 @@ namespace ApacKiosk.Forms.Admin
 
             _grid.Columns.Add("Id", "ID");
             _grid.Columns.Add("FullName", "Nome Completo");
-            _grid.Columns.Add("Username", "Usuário");
+            _grid.Columns.Add("Username", "Matrícula");
             _grid.Columns.Add("Profile", "Perfil");
             _grid.Columns.Add("Active", "Ativo");
             _grid.Columns.Add("Created", "Criado em");
@@ -138,7 +138,7 @@ namespace ApacKiosk.Forms.Admin
         private void AddUser()
         {
             var dialog = CreateUserDialog(null);
-            if (dialog.ShowDialog() == DialogResult.OK)
+            if (dialog.ShowDialog(this.FindForm()) == DialogResult.OK)
                 RefreshList();
         }
 
@@ -147,11 +147,11 @@ namespace ApacKiosk.Forms.Admin
             var userId = GetSelectedUserId();
             if (!userId.HasValue)
             {
-                MessageBox.Show("Selecione um usuário para editar.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("Selecione um usuário para editar.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
             var dialog = CreateUserDialog(userId.Value);
-            if (dialog.ShowDialog() == DialogResult.OK)
+            if (dialog.ShowDialog(this.FindForm()) == DialogResult.OK)
                 RefreshList();
         }
 
@@ -160,12 +160,12 @@ namespace ApacKiosk.Forms.Admin
             var userId = GetSelectedUserId();
             if (!userId.HasValue)
             {
-                MessageBox.Show("Selecione um usuário para excluir.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("Selecione um usuário para excluir.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
             var name = _grid.SelectedRows[0].Cells[1].Value.ToString();
-            if (MessageBox.Show($"Excluir o usuário \"{name}\"?\nEsta ação não pode ser desfeita.",
-                _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+            if (KioskDialog.ShowMessage($"Excluir o usuário \"{name}\"?\nEsta ação não pode ser desfeita.",
+                _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, this) == DialogResult.Yes)
             {
                 _userService.Delete(userId.Value);
                 _db.InsertLog(null, "event", null, $"Usuário excluído: {name}");
@@ -178,7 +178,7 @@ namespace ApacKiosk.Forms.Admin
             var userId = GetSelectedUserId();
             if (!userId.HasValue)
             {
-                MessageBox.Show("Selecione um usuário.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                KioskDialog.ShowMessage("Selecione um usuário.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                 return;
             }
             var active = _grid.SelectedRows[0].Cells[4].Value.ToString() == "Sim";
@@ -197,12 +197,14 @@ namespace ApacKiosk.Forms.Admin
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 BackColor = Color.FromArgb(22, 22, 45),
                 MaximizeBox = false,
-                MinimizeBox = false
+                MinimizeBox = false,
+                TopMost = true
             };
+            form.Owner = this.FindForm() as Form;
 
             var y = 15;
             var txtFullName = AddField(form, "Nome Completo:", ref y);
-            var txtUsername = AddField(form, "Nome de Usuário:", ref y);
+            var txtUsername = AddField(form, "Matrícula:", ref y);
             var txtPin = AddField(form, "PIN (4-8 dígitos):", ref y);
             txtPin.MaxLength = 8;
             txtPin.PasswordChar = '●';
@@ -274,7 +276,7 @@ namespace ApacKiosk.Forms.Admin
             btnBrowse.Click += (s, e) =>
             {
                 using var ofd = new OpenFileDialog { Filter = "Imagens|*.jpg;*.jpeg;*.png" };
-                if (ofd.ShowDialog() == DialogResult.OK)
+                if (ofd.ShowDialog(this.FindForm()) == DialogResult.OK)
                     txtPhoto.Text = ofd.FileName;
             };
             y += 45;
@@ -314,12 +316,12 @@ namespace ApacKiosk.Forms.Admin
             {
                 if (string.IsNullOrWhiteSpace(txtFullName.Text) || string.IsNullOrWhiteSpace(txtUsername.Text))
                 {
-                    MessageBox.Show("Preencha Nome e Usuário.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    KioskDialog.ShowMessage("Preencha Nome e Usuário.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                     return;
                 }
                 if (!userId.HasValue && (txtPin.Text.Length < 4 || txtPin.Text.Length > 8))
                 {
-                    MessageBox.Show("PIN deve ter entre 4 e 8 dígitos.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    KioskDialog.ShowMessage("PIN deve ter entre 4 e 8 dígitos.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                     return;
                 }
 
@@ -387,6 +389,7 @@ namespace ApacKiosk.Forms.Admin
             };
             y += 45;
             form.Controls.Add(lbl);
+            form.Controls.Add(txt);
             return txt;
         }
 

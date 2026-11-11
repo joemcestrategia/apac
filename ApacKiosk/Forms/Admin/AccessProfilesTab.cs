@@ -255,23 +255,23 @@ namespace ApacKiosk.Forms.Admin
         private void AddProfile()
         {
             var dialog = CreateProfileDialog(null);
-            if (dialog.ShowDialog() == DialogResult.OK) RefreshList();
+            if (dialog.ShowDialog(this.FindForm()) == DialogResult.OK) RefreshList();
         }
 
         private void EditProfile()
         {
             var pid = GetSelectedProfileId();
-            if (!pid.HasValue) { MessageBox.Show("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (!pid.HasValue) { KioskDialog.ShowMessage("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this); return; }
             var dialog = CreateProfileDialog(pid.Value);
-            if (dialog.ShowDialog() == DialogResult.OK) RefreshList();
+            if (dialog.ShowDialog(this.FindForm()) == DialogResult.OK) RefreshList();
         }
 
         private void DeleteProfile()
         {
             var pid = GetSelectedProfileId();
-            if (!pid.HasValue) { MessageBox.Show("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (!pid.HasValue) { KioskDialog.ShowMessage("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this); return; }
             var name = _grid.SelectedRows[0].Cells[1].Value.ToString();
-            if (MessageBox.Show($"Excluir o perfil \"{name}\"?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes)
+            if (KioskDialog.ShowMessage($"Excluir o perfil \"{name}\"?", _config.DisplayName, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, this) == DialogResult.Yes)
             {
                 _profileService.Delete(pid.Value);
                 _db.InsertLog(null, "event", null, $"Perfil excluído: {name}");
@@ -284,12 +284,13 @@ namespace ApacKiosk.Forms.Admin
             var form = new Form
             {
                 Text = profileId.HasValue ? "Editar Perfil" : "Novo Perfil",
-                Size = new Size(480, 380),
+                Size = new Size(480, 460),
                 StartPosition = FormStartPosition.CenterParent,
                 FormBorderStyle = FormBorderStyle.FixedDialog,
                 BackColor = Color.FromArgb(22, 22, 45),
-                MaximizeBox = false, MinimizeBox = false
+                MaximizeBox = false, MinimizeBox = false, TopMost = true
             };
+            form.Owner = this.FindForm() as Form;
 
             var y = 15;
             var txtName = AddField(form, "Nome do Perfil:", ref y);
@@ -322,7 +323,7 @@ namespace ApacKiosk.Forms.Admin
             {
                 if (string.IsNullOrWhiteSpace(txtName.Text))
                 {
-                    MessageBox.Show("Digite o nome do perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    KioskDialog.ShowMessage("Digite o nome do perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this);
                     return;
                 }
                 var homepage = string.IsNullOrWhiteSpace(txtHomepage.Text) ? "https://www.google.com" : txtHomepage.Text.Trim();
@@ -346,6 +347,7 @@ namespace ApacKiosk.Forms.Admin
             var txt = new TextBox { Location = new Point(20, y), Size = new Size(420, 28), Font = new Font("Segoe UI", 10), BackColor = Color.FromArgb(26, 26, 46), ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
             y += 42;
             form.Controls.Add(lbl);
+            form.Controls.Add(txt);
             return txt;
         }
 
@@ -356,20 +358,22 @@ namespace ApacKiosk.Forms.Admin
             var num = new NumericUpDown { Location = new Point(20, y), Size = new Size(120, 28), Minimum = min, Maximum = max, Font = new Font("Segoe UI", 10), BackColor = Color.FromArgb(26, 26, 46), ForeColor = Color.White, BorderStyle = BorderStyle.FixedSingle };
             y += 42;
             form.Controls.Add(lbl);
+            form.Controls.Add(num);
             return num;
         }
 
         private void AddTimeRule()
         {
             var pid = GetSelectedProfileId();
-            if (!pid.HasValue) { MessageBox.Show("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (!pid.HasValue) { KioskDialog.ShowMessage("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this); return; }
 
             var form = new Form
             {
                 Text = "Adicionar Regra de Horário", Size = new Size(350, 280),
                 StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog,
-                BackColor = Color.FromArgb(22, 22, 45), MaximizeBox = false, MinimizeBox = false
+                BackColor = Color.FromArgb(22, 22, 45), MaximizeBox = false, MinimizeBox = false, TopMost = true
             };
+            form.Owner = this.FindForm() as Form;
 
             var y = 15;
             var lblDay = new Label { Text = "Dia da Semana:", Font = new Font("Segoe UI", 10, FontStyle.Bold), ForeColor = Color.FromArgb(200, 200, 220), Location = new Point(20, y), AutoSize = true };
@@ -402,7 +406,7 @@ namespace ApacKiosk.Forms.Admin
             };
 
             form.Controls.AddRange(new Control[] { lblDay, cmbDay, lblStart, dtpStart, lblEnd, dtpEnd, btnSave });
-            form.ShowDialog();
+            form.ShowDialog(this.FindForm());
         }
 
         private void RemoveTimeRule()
@@ -422,15 +426,67 @@ namespace ApacKiosk.Forms.Admin
         private void AddSiteToProfile()
         {
             var pid = GetSelectedProfileId();
-            if (!pid.HasValue) { MessageBox.Show("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
+            if (!pid.HasValue) { KioskDialog.ShowMessage("Selecione um perfil.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, this); return; }
 
-            var input = Microsoft.VisualBasic.Interaction.InputBox("Digite a URL ou domínio:", "Adicionar Site", "");
-            if (!string.IsNullOrWhiteSpace(input))
+            var form = new Form
             {
-                _siteService.Add(input.Trim(), pid.Value, false);
-                _db.InsertLog(null, "event", null, $"Site adicionado ao perfil {pid}: {input}");
-                LoadDetail();
-            }
+                Text = "Adicionar Site",
+                Size = new Size(500, 180),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                BackColor = Color.FromArgb(22, 22, 45),
+                MaximizeBox = false, MinimizeBox = false, TopMost = true
+            };
+            form.Owner = this.FindForm() as Form;
+
+            var lbl = new Label
+            {
+                Text = "Digite a URL ou domínio:",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(200, 200, 220),
+                Location = new Point(20, 20),
+                AutoSize = true
+            };
+
+            var txtInput = new TextBox
+            {
+                Location = new Point(20, 50),
+                Size = new Size(440, 28),
+                Font = new Font("Segoe UI", 11),
+                BackColor = Color.FromArgb(26, 26, 46),
+                ForeColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+
+            var btnOk = new Button
+            {
+                Text = "Adicionar",
+                Location = new Point(160, 95),
+                Size = new Size(180, 35),
+                Font = new Font("Segoe UI", 11, FontStyle.Bold),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(124, 58, 237),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand
+            };
+            btnOk.FlatAppearance.BorderSize = 0;
+            btnOk.Click += (s, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(txtInput.Text))
+                {
+                    var input = txtInput.Text.Trim();
+                    _siteService.Add(input, pid.Value, false);
+                    _db.InsertLog(null, "event", null, $"Site adicionado ao perfil {pid}: {input}");
+                    LoadDetail();
+                }
+                form.Close();
+            };
+
+            txtInput.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) btnOk.PerformClick(); };
+            form.AcceptButton = btnOk;
+
+            form.Controls.AddRange(new Control[] { lbl, txtInput, btnOk });
+            form.ShowDialog(this.FindForm());
         }
 
         private void RemoveSiteFromProfile()

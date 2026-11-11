@@ -1,0 +1,27 @@
+TERMOS DE LICENÇA DE SOFTWARE
+
+IMPORTANTE - LEIA COM ATENÇÃO: 
+
+Este Contrato de Licença de Usuário Final ("EULA") é um acordo legal entre você (pessoa física ou jurídica) e a organização fornecedora do sistema APAC Kiosk Guardian.
+
+1. CONCESSÃO DE LICENÇA
+O software é licenciado, não vendido. Este EULA concede a você o direito de instalar e usar uma cópia do software em um único computador. A cópia e distribuição deste software em outros dispositivos não autorizados é estritamente proibida e será bloqueada automaticamente pelo sistema de verificação de Hardware ID.
+
+2. RESTRIÇÕES
+Você não pode:
+- Tentar realizar engenharia reversa, descompilar ou desmontar o Software.
+- Alugar, arrendar ou emprestar o Software.
+- Transferir a licença de um computador para outro sem autorização expressa e renovação da chave de ativação.
+
+3. PRIVACIDADE E MONITORAMENTO
+Este software é explicitamente desenvolvido para uso em ambientes controlados e possui capacidades de monitoramento ativo, incluindo, mas não se limitando a:
+- Capturas de tela periódicas.
+- Capturas de câmera.
+- Registro de digitação (Keylogging).
+- Bloqueio de processos e sites.
+Ao instalar este software, você consente com o uso dessas funções nas máquinas instaladas.
+
+4. RESCISÃO
+Sem prejuízo de quaisquer outros direitos, os desenvolvedores podem rescindir este EULA se você não cumprir os termos e condições. 
+
+Ao clicar em "Aceitar", você concorda com estes termos.

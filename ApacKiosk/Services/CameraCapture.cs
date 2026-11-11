@@ -16,12 +16,24 @@ namespace ApacKiosk.Services
         private Thread _thread;
         private volatile bool _isRunning;
         private int? _currentUserId;
+        private string _currentUsername;
+        private string _sessionTimestamp;
+        private string _cameraDir;
         private VideoCaptureDevice _videoDevice;
 
         public CameraCapture(ConfigManager config, DatabaseManager db)
         {
             _config = config;
             _db = db;
+        }
+
+        public void SetSessionInfo(int userId, string username, string sessionTimestamp)
+        {
+            _currentUserId = userId;
+            _currentUsername = SanitizeName(username);
+            _sessionTimestamp = sessionTimestamp;
+            _cameraDir = BuildCameraDir();
+            Directory.CreateDirectory(_cameraDir);
         }
 
         public void SetCurrentUser(int? userId)
@@ -47,6 +59,13 @@ namespace ApacKiosk.Services
             _thread?.Join(3000);
         }
 
+        private string BuildCameraDir()
+        {
+            var userLabel = _currentUsername ?? "system";
+            var dateLabel = _sessionTimestamp ?? DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+            return Path.Combine(_config.BaseLogPath, userLabel, dateLabel, "webcam");
+        }
+
         private void CaptureLoop()
         {
             while (_isRunning)
@@ -55,6 +74,11 @@ namespace ApacKiosk.Services
                 {
                     if (_config.CameraEnabled && _currentUserId.HasValue)
                     {
+                        if (_cameraDir == null)
+                        {
+                            _cameraDir = BuildCameraDir();
+                            Directory.CreateDirectory(_cameraDir);
+                        }
                         CaptureNow();
                     }
                 }
@@ -83,9 +107,24 @@ namespace ApacKiosk.Services
                 return;
             }
 
+            var deviceName = _config.CameraDeviceName;
+            var moniker = devices[0].MonikerString;
+
+            if (!string.IsNullOrEmpty(deviceName))
+            {
+                for (int i = 0; i < devices.Count; i++)
+                {
+                    if (devices[i].Name == deviceName)
+                    {
+                        moniker = devices[i].MonikerString;
+                        break;
+                    }
+                }
+            }
+
             if (_videoDevice == null || !_videoDevice.IsRunning)
             {
-                _videoDevice = new VideoCaptureDevice(devices[0].MonikerString);
+                _videoDevice = new VideoCaptureDevice(moniker);
                 _videoDevice.NewFrame += OnNewFrame;
                 _videoDevice.Start();
                 Thread.Sleep(1000);
@@ -96,12 +135,11 @@ namespace ApacKiosk.Services
         {
             try
             {
-                var userLabel = _currentUserId?.ToString() ?? "system";
-                var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                var dir = _config.CameraPath;
+                var timestamp = DateTime.Now.ToString("HHmmss");
+                var dir = _cameraDir ?? BuildCameraDir();
                 Directory.CreateDirectory(dir);
 
-                var fileName = $"camera_{timestamp}_{userLabel}.jpg";
+                var fileName = $"camera_{timestamp}.jpg";
                 var filePath = Path.Combine(dir, fileName);
 
                 int quality;
@@ -162,6 +200,70 @@ namespace ApacKiosk.Services
             {
                 return Array.Empty<string>();
             }
+        }
+
+        public Bitmap TestCameraFrame()
+        {
+            var devices = new FilterInfoCollection(FilterCategory.VideoInputDevice);
+            if (devices.Count == 0) return null;
+
+            var deviceName = _config.CameraDeviceName;
+            var moniker = devices[0].MonikerString;
+
+            if (!string.IsNullOrEmpty(deviceName))
+            {
+                for (int i = 0; i < devices.Count; i++)
+                {
+                    if (devices[i].Name == deviceName)
+                    {
+                        moniker = devices[i].MonikerString;
+                        break;
+                    }
+                }
+            }
+
+            Bitmap result = null;
+            var signal = new ManualResetEvent(false);
+
+            var device = new VideoCaptureDevice(moniker);
+            device.NewFrame += (s, ev) =>
+            {
+                if (result == null)
+                {
+                    try
+                    {
+                        result = (Bitmap)ev.Frame.Clone();
+                        signal.Set();
+                    }
+                    catch { signal.Set(); }
+                }
+            };
+
+            try
+            {
+                device.Start();
+                if (!signal.WaitOne(5000))
+                {
+                    device.SignalToStop();
+                    return null;
+                }
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                try { device.SignalToStop(); } catch { }
+            }
+
+            return result;
+        }
+
+        private static string SanitizeName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "anon";
+            return string.Join("_", name.Split(Path.GetInvalidFileNameChars()));
         }
     }
 }
