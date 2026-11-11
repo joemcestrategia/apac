@@ -22,7 +22,7 @@ namespace ApacKiosk.Forms.Admin
         private PictureBox _logoPreview;
         private CheckBox _chkAutostart;
 
-        private TextBox _txtSerialKey;
+        private Label _lblSerialKey;
         private Button _btnChangeSerial;
 
         private TextBox _txtCurrentPassword;
@@ -99,19 +99,46 @@ namespace ApacKiosk.Forms.Admin
             y += 20;
 
             y = AddSectionLabel("🛡️ Licença e Ativação", y);
-            _txtSerialKey = AddTextField("Chave Serial:", ref y);
-            _txtSerialKey.ReadOnly = true;
+
+            var lblSerialDesc = new Label
+            {
+                Text = "Serial Ativo:",
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                ForeColor = Color.FromArgb(200, 200, 220),
+                Location = new Point(50, y + 8),
+                AutoSize = true
+            };
+            Controls.Add(lblSerialDesc);
+
+            _lblSerialKey = new Label
+            {
+                Text = "Nenhuma licença ativa",
+                Font = new Font("Consolas", 10.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(52, 211, 153),
+                BackColor = Color.FromArgb(26, 26, 46),
+                BorderStyle = BorderStyle.FixedSingle,
+                Location = new Point(200, y + 4),
+                Size = new Size(320, 32),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(8, 0, 0, 0)
+            };
+            Controls.Add(_lblSerialKey);
 
             _btnChangeSerial = new Button
             {
-                Text = "Alterar Licença", Location = new Point(200, y + 5), Size = new Size(180, 38),
-                Font = new Font("Segoe UI", 11, FontStyle.Bold), FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand
+                Text = "🔑 Alterar Serial",
+                Location = new Point(530, y + 3),
+                Size = new Size(160, 34),
+                Font = new Font("Segoe UI", 10, FontStyle.Bold),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(59, 130, 246),
+                ForeColor = Color.White,
+                Cursor = Cursors.Hand
             };
             _btnChangeSerial.FlatAppearance.BorderSize = 0;
             _btnChangeSerial.Click += (s, e) => ChangeSerial();
             Controls.Add(_btnChangeSerial);
-            y += 55;
+            y += 50;
 
             y += 10;
             var sepLicense = new Panel { Location = new Point(0, y), Size = new Size(600, 2), BackColor = Color.FromArgb(50, 50, 80) };
@@ -261,7 +288,7 @@ namespace ApacKiosk.Forms.Admin
         private void LoadSettings()
         {
             _txtDisplayName.Text = _config.DisplayName;
-            _txtSerialKey.Text = _config.LicenseSignature;
+            UpdateSerialDisplay();
             _txtWelcomeMessage.Text = _config.WelcomeMessage;
             _txtLogoPath.Text = _config.LogoPath;
             if (!string.IsNullOrEmpty(_config.LogoPath) && File.Exists(_config.LogoPath))
@@ -291,8 +318,23 @@ namespace ApacKiosk.Forms.Admin
             using var actForm = new ActivationForm(licenseManager, _config);
             if (actForm.ShowDialog(this.FindForm()) == DialogResult.OK)
             {
-                _txtSerialKey.Text = _config.LicenseSignature;
+                UpdateSerialDisplay();
                 _db.InsertLog(null, "event", null, "Chave serial atualizada");
+            }
+        }
+
+        private void UpdateSerialDisplay()
+        {
+            var serial = _config.LicenseSignature;
+            if (string.IsNullOrWhiteSpace(serial))
+            {
+                _lblSerialKey.Text = "Nenhuma licença ativa";
+                _lblSerialKey.ForeColor = Color.FromArgb(239, 68, 68);
+            }
+            else
+            {
+                _lblSerialKey.Text = serial;
+                _lblSerialKey.ForeColor = Color.FromArgb(52, 211, 153);
             }
         }
 
