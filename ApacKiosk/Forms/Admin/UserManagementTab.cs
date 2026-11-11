@@ -325,37 +325,64 @@ namespace ApacKiosk.Forms.Admin
                     return;
                 }
 
+                var trimmedUsername = txtUsername.Text.Trim();
+                try
+                {
+                    using (var checkConn = _db.GetConnection())
+                    {
+                        var checkCmd = checkConn.CreateCommand();
+                        checkCmd.CommandText = "SELECT COUNT(*) FROM users WHERE username = @un AND (@uid IS NULL OR id != @uid)";
+                        checkCmd.Parameters.AddWithValue("@un", trimmedUsername);
+                        checkCmd.Parameters.AddWithValue("@uid", userId.HasValue ? (object)userId.Value : DBNull.Value);
+                        var count = Convert.ToInt32(checkCmd.ExecuteScalar());
+                        if (count > 0)
+                        {
+                            KioskDialog.ShowMessage($"Já existe um usuário cadastrado com a matrícula '{trimmedUsername}'.\nPor favor, informe uma matrícula diferente.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, form);
+                            return;
+                        }
+                    }
+                }
+                catch { }
+
                 var profileId = (cmbProfile.SelectedItem as ComboItem<int?>)?.Value;
                 var photoPath = string.IsNullOrWhiteSpace(txtPhoto.Text) ? null : txtPhoto.Text;
 
-                if (userId.HasValue)
+                try
                 {
-                    _userService.Update(userId.Value, txtFullName.Text.Trim(), txtUsername.Text.Trim(),
-                        profileId, true, photoPath);
-                    if (!string.IsNullOrWhiteSpace(txtPin.Text))
+                    if (userId.HasValue)
+                    {
+                        _userService.Update(userId.Value, txtFullName.Text.Trim(), trimmedUsername,
+                            profileId, true, photoPath);
+                        if (!string.IsNullOrWhiteSpace(txtPin.Text))
+                        {
+                            var hash = PasswordHash.HashPassword(txtPin.Text);
+                            using var conn = _db.GetConnection();
+                            var cmd = conn.CreateCommand();
+                            cmd.CommandText = "UPDATE users SET pin_hash = @h WHERE id = @id";
+                            cmd.Parameters.AddWithValue("@h", hash);
+                            cmd.Parameters.AddWithValue("@id", userId.Value);
+                            cmd.ExecuteNonQuery();
+                        }
+                    }
+                    else
                     {
                         var hash = PasswordHash.HashPassword(txtPin.Text);
                         using var conn = _db.GetConnection();
                         var cmd = conn.CreateCommand();
-                        cmd.CommandText = "UPDATE users SET pin_hash = @h WHERE id = @id";
-                        cmd.Parameters.AddWithValue("@h", hash);
-                        cmd.Parameters.AddWithValue("@id", userId.Value);
+                        cmd.CommandText = @"INSERT INTO users (full_name, username, pin_hash, profile_id, photo_path, is_active)
+                                           VALUES (@fn, @un, @ph, @pi, @pp, 1)";
+                        cmd.Parameters.AddWithValue("@fn", txtFullName.Text.Trim());
+                        cmd.Parameters.AddWithValue("@un", trimmedUsername);
+                        cmd.Parameters.AddWithValue("@ph", hash);
+                        cmd.Parameters.AddWithValue("@pi", profileId.HasValue ? (object)profileId.Value : DBNull.Value);
+                        cmd.Parameters.AddWithValue("@pp", (object?)photoPath ?? DBNull.Value);
                         cmd.ExecuteNonQuery();
                     }
                 }
-                else
+                catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 19)
                 {
-                    var hash = PasswordHash.HashPassword(txtPin.Text);
-                    using var conn = _db.GetConnection();
-                    var cmd = conn.CreateCommand();
-                    cmd.CommandText = @"INSERT INTO users (full_name, username, pin_hash, profile_id, photo_path, is_active)
-                                       VALUES (@fn, @un, @ph, @pi, @pp, 1)";
-                    cmd.Parameters.AddWithValue("@fn", txtFullName.Text.Trim());
-                    cmd.Parameters.AddWithValue("@un", txtUsername.Text.Trim());
-                    cmd.Parameters.AddWithValue("@ph", hash);
-                    cmd.Parameters.AddWithValue("@pi", profileId.HasValue ? (object)profileId.Value : DBNull.Value);
-                    cmd.Parameters.AddWithValue("@pp", (object?)photoPath ?? DBNull.Value);
-                    cmd.ExecuteNonQuery();
+                    KioskDialog.ShowMessage($"A matrícula '{trimmedUsername}' já está em uso por outro usuário.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Warning, form);
+                    return;
                 }
                 _db.InsertLog(null, "event", null, $"Usuário {(userId.HasValue ? "editado" : "criado")}: {txtFullName.Text}");
                 form.DialogResult = DialogResult.OK;

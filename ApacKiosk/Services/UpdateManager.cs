@@ -198,6 +198,7 @@ public class UpdateManager
         string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? "";
         if (string.IsNullOrEmpty(currentExe)) return;
 
+        int pid = Process.GetCurrentProcess().Id;
         string currentDir = Path.GetDirectoryName(currentExe) ?? "";
         string backupExe = Path.Combine(currentDir, "ApacKiosk.old.exe");
 
@@ -206,10 +207,15 @@ public class UpdateManager
         string[] batLines =
         {
             "@echo off",
-            "timeout /t 3 /nobreak > nul",
-            $"if exist \"{backupExe}\" del /F /Q \"{backupExe}\"",
+            $":wait_loop",
+            $"tasklist /fi \"PID eq {pid}\" | find \"{pid}\" >nul",
+            $"if not errorlevel 1 (",
+            $"    timeout /t 1 /nobreak >nul",
+            $"    goto wait_loop",
+            $")",
+            $"if exist \"{backupExe}\" del /F /Q \"{backupExe}\" >nul 2>&1",
             $"rename \"{currentExe}\" \"ApacKiosk.old.exe\"",
-            $"copy /Y \"{newExePath}\" \"{currentExe}\"",
+            $"copy /Y \"{newExePath}\" \"{currentExe}\" >nul",
             $"start \"\" \"{currentExe}\"",
             "del \"%~f0\""
         };

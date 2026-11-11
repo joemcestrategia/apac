@@ -752,24 +752,16 @@ namespace ApacKiosk.Forms
             }
         }
 
+        private DateTime _lastUpdateCheck = DateTime.MinValue;
+
         private async void PromptAdminAndUpdate()
         {
-            var (result, pwd) = KioskDialog.ShowPasswordPrompt(
-                "Digite a senha de administrador para verificar e instalar atualizações:",
-                "Atualização do Sistema", this);
-
-            if (result != DialogResult.OK || string.IsNullOrWhiteSpace(pwd))
-                return;
-
-            using var conn = _db.GetConnection();
-            var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT password_hash FROM admins WHERE username = 'admin'";
-            var hash = cmd.ExecuteScalar()?.ToString();
-            if (hash == null || !BCrypt.Net.BCrypt.Verify(pwd, hash))
+            // Proteção anti-spam: evita múltiplos cliques seguidos
+            if ((DateTime.Now - _lastUpdateCheck).TotalSeconds < 5)
             {
-                KioskDialog.ShowMessage("Senha de administrador incorreta.", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
                 return;
             }
+            _lastUpdateCheck = DateTime.Now;
 
             _btnSystemUpdate.Enabled = false;
             _btnSystemUpdate.Text = "Verificando...";
@@ -792,7 +784,7 @@ namespace ApacKiosk.Forms
             }
             catch (Exception ex)
             {
-                KioskDialog.ShowMessage($"Erro ao atualizar sistema:\n{ex.Message}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
+                KioskDialog.ShowMessage($"Erro ao verificar atualização:\n{ex.Message}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, this);
             }
             finally
             {
