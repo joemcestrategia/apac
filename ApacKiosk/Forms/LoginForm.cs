@@ -376,7 +376,22 @@ namespace ApacKiosk.Forms
             Controls.Add(_bgPanel);
 
             Resize += (s, e) => CenterLoginLayout();
-            Shown += (s, e) => CenterLoginLayout();
+            Shown += (s, e) =>
+            {
+                CenterLoginLayout();
+                Program.Security?.SetMainWindow(Handle);
+                Program.Security?.SetKioskLock(true);
+                Program.Security?.ResumeWindowProtector();
+                Program.Security?.ForceHideTaskbar();
+            };
+            Activated += (s, e) =>
+            {
+                if (!_isShuttingDown)
+                {
+                    Program.Security?.SetMainWindow(Handle);
+                    Program.Security?.ForceHideTaskbar();
+                }
+            };
         }
 
         private void BuildUserPanel()
@@ -743,6 +758,7 @@ namespace ApacKiosk.Forms
                 if (hash != null && BCrypt.Net.BCrypt.Verify(pwd, hash))
                 {
                     _isShuttingDown = true;
+                    Program.Security?.DisableAllSecurity();
                     Close();
                 }
                 else
@@ -792,6 +808,10 @@ namespace ApacKiosk.Forms
                 {
                     _btnSystemUpdate.Enabled = true;
                     _btnSystemUpdate.Text = "🔄 Atualizar Sistema";
+                    Program.Security?.SetMainWindow(Handle);
+                    Program.Security?.SetKioskLock(true);
+                    Program.Security?.ResumeWindowProtector();
+                    Program.Security?.ForceHideTaskbar();
                 }
             }
         }

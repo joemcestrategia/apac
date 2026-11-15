@@ -21,6 +21,7 @@ namespace ApacKiosk.Services
         private volatile bool _windowProtectorPaused;
         private IntPtr _mainWindowHandle;
         private IntPtr _hookHandle = IntPtr.Zero;
+        private uint _hookThreadId;
         private NativeMethods.LowLevelKeyboardProc _hookProc;
         private bool _isKioskLocked = true;
         private readonly List<Process> _killedProcesses = new List<Process>();
@@ -52,15 +53,17 @@ namespace ApacKiosk.Services
 
         public void EnableAllSecurity()
         {
+            HideTaskbar();
             if (_isRunning) return;
             _isRunning = true;
-            HideTaskbar();
             EnableHotkeyBlock();
             EnableWatchdog();
             EnableWindowProtector();
             EnableRegistryProtector();
             SetupCtrlAltDelPolicy();
         }
+
+        public void ForceHideTaskbar() => HideTaskbar();
 
         public void DisableAllSecurity()
         {
@@ -76,11 +79,27 @@ namespace ApacKiosk.Services
             _hookProc = HookCallback;
             _hookThread = new Thread(() =>
             {
-                _hookHandle = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _hookProc,
-                    NativeMethods.GetModuleHandle(null), 0);
-                System.Windows.Forms.Application.Run();
+                try
+                {
+                    _hookThreadId = GetCurrentThreadId();
+                    _hookHandle = NativeMethods.SetWindowsHookEx(NativeMethods.WH_KEYBOARD_LL, _hookProc,
+                        NativeMethods.GetModuleHandle(null), 0);
+                    System.Windows.Forms.Application.Run();
+                }
+                catch { }
+                finally
+                {
+                    if (_hookHandle != IntPtr.Zero)
+                    {
+                        NativeMethods.UnhookWindowsHookEx(_hookHandle);
+                        _hookHandle = IntPtr.Zero;
+                    }
+                    _hookThreadId = 0;
+                    _isHookRunning = false;
+                }
             })
-            { IsBackground = true, Name = "KeyboardHook", ApartmentState = ApartmentState.STA };
+            { IsBackground = true, Name = "KeyboardHook" };
+            _hookThread.SetApartmentState(ApartmentState.STA);
             _hookThread.Start();
         }
 
@@ -92,12 +111,17 @@ namespace ApacKiosk.Services
                 var vkCode = (int)hookStruct.vkCode;
                 var flags = hookStruct.flags;
                 var isAltDown = (flags & LLKHF_ALTDOWN) != 0;
+                var msg = wParam.ToInt32();
 
-                if (wParam == (IntPtr)NativeMethods.WM_KEYDOWN || wParam == (IntPtr)NativeMethods.WM_SYSKEYDOWN)
+                if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN ||
+                    msg == WM_KEYUP || msg == WM_SYSKEYUP)
                 {
                     if (vkCode == NativeMethods.VK_LWIN || vkCode == NativeMethods.VK_RWIN)
                         return (IntPtr)1;
+                }
 
+                if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
+                {
                     if (vkCode == NativeMethods.VK_TAB && isAltDown)
                         return (IntPtr)1;
 
@@ -122,7 +146,11 @@ namespace ApacKiosk.Services
                 NativeMethods.UnhookWindowsHookEx(_hookHandle);
                 _hookHandle = IntPtr.Zero;
             }
-            try { System.Windows.Forms.Application.Exit(); } catch { }
+            if (_hookThreadId != 0)
+            {
+                PostThreadMessage(_hookThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+                _hookThreadId = 0;
+            }
         }
 
         private void SetupCtrlAltDelPolicy()
@@ -188,26 +216,32 @@ namespace ApacKiosk.Services
                 {
                     try
                     {
-                        if (_mainWindowHandle != IntPtr.Zero && !_windowProtectorPaused)
+                        if (_isKioskLocked && !_windowProtectorPaused)
                         {
-                            if (!IsIconic(_mainWindowHandle))
-                            {
-                                SetWindowPosTopMost(_mainWindowHandle);
-                            }
+                            EnforceHiddenTaskbars();
 
-                            var fgWnd = GetForegroundWindow();
-                            if (fgWnd != _mainWindowHandle && fgWnd != IntPtr.Zero && !IsAllowedForegroundWindow(fgWnd))
+                            if (_mainWindowHandle != IntPtr.Zero)
                             {
-                                if (IsIconic(_mainWindowHandle))
-                                    ShowWindow(_mainWindowHandle, SW_RESTORE);
-                                SetWindowPosTopMost(_mainWindowHandle);
-                                BringWindowToFront(_mainWindowHandle);
-                                SetFocus(_mainWindowHandle);
+                                if (!IsIconic(_mainWindowHandle))
+                                {
+                                    SetWindowPosTopMost(_mainWindowHandle);
+                                }
+
+                                var fgWnd = GetForegroundWindow();
+                                if (fgWnd != _mainWindowHandle && fgWnd != IntPtr.Zero && !IsAllowedForegroundWindow(fgWnd))
+                                {
+                                    SuppressStartMenuWindowIfNeeded(fgWnd);
+
+                                    if (IsIconic(_mainWindowHandle))
+                                        ShowWindow(_mainWindowHandle, SW_RESTORE);
+                                    SetWindowPosTopMost(_mainWindowHandle);
+                                    ForceWindowForeground(_mainWindowHandle);
+                                }
                             }
                         }
                     }
                     catch { }
-                    Thread.Sleep(500);
+                    Thread.Sleep(150);
                 }
             })
             { IsBackground = true, Name = "WindowProtector" };
@@ -217,6 +251,7 @@ namespace ApacKiosk.Services
         private bool IsAllowedForegroundWindow(IntPtr hWnd)
         {
             NativeMethods.GetWindowThreadProcessId(hWnd, out uint pid);
+            if (pid == (uint)Environment.ProcessId) return true;
 
             lock (_lockAllowedPids)
             {
@@ -238,7 +273,7 @@ namespace ApacKiosk.Services
                 {
                     if (_allowedProcessNames.Contains(procName))
                     {
-                        _allowedProcessIds.Add((int)pid); // Cache it
+                        _allowedProcessIds.Add((int)pid);
                         return true;
                     }
                 }
@@ -368,6 +403,14 @@ namespace ApacKiosk.Services
         {
             try
             {
+                EnumWindows((hwnd, _) =>
+                {
+                    var cls = GetWindowClassName(hwnd);
+                    if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd")
+                        ShowWindow(hwnd, SW_HIDE);
+                    return true;
+                }, IntPtr.Zero);
+
                 var taskbar = FindWindow("Shell_TrayWnd", null);
                 if (taskbar != IntPtr.Zero)
                     ShowWindow(taskbar, SW_HIDE);
@@ -383,10 +426,101 @@ namespace ApacKiosk.Services
             catch { }
         }
 
+        private void EnforceHiddenTaskbars()
+        {
+            try
+            {
+                EnumWindows((hwnd, _) =>
+                {
+                    if (!IsWindowVisible(hwnd)) return true;
+                    var cls = GetWindowClassName(hwnd);
+                    if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd" || IsStartOrSearchProcessWindow(hwnd))
+                    {
+                        ShowWindow(hwnd, SW_HIDE);
+                    }
+                    return true;
+                }, IntPtr.Zero);
+            }
+            catch { }
+        }
+
+        private void SuppressStartMenuWindowIfNeeded(IntPtr fgWnd)
+        {
+            try
+            {
+                var cls = GetWindowClassName(fgWnd);
+                if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd" || IsStartOrSearchProcessWindow(fgWnd))
+                {
+                    ShowWindow(fgWnd, SW_HIDE);
+                }
+            }
+            catch { }
+        }
+
+        private static bool IsStartOrSearchProcessWindow(IntPtr hwnd)
+        {
+            try
+            {
+                NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+                if (pid == 0) return false;
+                using var proc = Process.GetProcessById((int)pid);
+                var name = proc.ProcessName;
+                return name.Equals("StartMenuExperienceHost", StringComparison.OrdinalIgnoreCase) ||
+                       name.Equals("SearchHost", StringComparison.OrdinalIgnoreCase) ||
+                       name.Equals("SearchUI", StringComparison.OrdinalIgnoreCase) ||
+                       name.Equals("SearchApp", StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static void ForceWindowForeground(IntPtr hWnd)
+        {
+            try
+            {
+                var fg = GetForegroundWindow();
+                uint fgThread = fg != IntPtr.Zero ? NativeMethods.GetWindowThreadProcessId(fg, out _) : 0;
+                uint curThread = GetCurrentThreadId();
+                bool attached = fgThread != 0 && fgThread != curThread && AttachThreadInput(curThread, fgThread, true);
+                try
+                {
+                    BringWindowToFront(hWnd);
+                    SetForegroundWindow(hWnd);
+                    SetFocus(hWnd);
+                }
+                finally
+                {
+                    if (attached) AttachThreadInput(curThread, fgThread, false);
+                }
+            }
+            catch
+            {
+                BringWindowToFront(hWnd);
+                SetFocus(hWnd);
+            }
+        }
+
+        private static string GetWindowClassName(IntPtr hwnd)
+        {
+            var sb = new StringBuilder(128);
+            GetClassName(hwnd, sb, sb.Capacity);
+            return sb.ToString();
+        }
+
         private void RestoreTaskbar()
         {
             try
             {
+                EnumWindows((hwnd, _) =>
+                {
+                    var cls = GetWindowClassName(hwnd);
+                    if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd")
+                        ShowWindow(hwnd, SW_SHOW);
+                    return true;
+                }, IntPtr.Zero);
+
                 var taskbar = FindWindow("Shell_TrayWnd", null);
                 if (taskbar != IntPtr.Zero)
                     ShowWindow(taskbar, SW_SHOW);
@@ -460,6 +594,8 @@ namespace ApacKiosk.Services
 
         #region Win32 P/Invoke
 
+        private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
 
@@ -467,7 +603,13 @@ namespace ApacKiosk.Services
         private static extern bool BringWindowToFront(IntPtr hWnd);
 
         [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
         private static extern IntPtr SetFocus(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -479,6 +621,22 @@ namespace ApacKiosk.Services
         private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool PostThreadMessage(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll")]
         private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
         [DllImport("user32.dll", SetLastError = true)]
@@ -487,6 +645,9 @@ namespace ApacKiosk.Services
         private const int SW_RESTORE = 9;
         private const int SW_HIDE = 0;
         private const int SW_SHOW = 5;
+        private const uint WM_QUIT = 0x0012;
+        private const int WM_KEYUP = 0x0101;
+        private const int WM_SYSKEYUP = 0x0105;
 
         private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         private const uint SWP_NOMOVE = 2;

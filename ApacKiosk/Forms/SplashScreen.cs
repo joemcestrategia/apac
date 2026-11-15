@@ -29,6 +29,9 @@ public class SplashScreen : Form
     private void InitializeComponent()
     {
         Text = "APAC Kiosk Guardian";
+        StartPosition = FormStartPosition.Manual;
+        if (Screen.PrimaryScreen != null)
+            Bounds = Screen.PrimaryScreen.Bounds;
         WindowState = FormWindowState.Maximized;
         FormBorderStyle = FormBorderStyle.None;
         BackColor = Color.FromArgb(8, 10, 22);
@@ -159,17 +162,32 @@ public class SplashScreen : Form
 
         Shown += async (s, e) =>
         {
+            Program.Security?.SetMainWindow(Handle);
+            Program.Security?.SetKioskLock(true);
+            Program.Security?.ResumeWindowProtector();
+            Program.Security?.ForceHideTaskbar();
             _timer.Start();
             await CheckUpdatesInBackgroundAsync();
         };
     }
 
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (DialogResult != DialogResult.OK && e.CloseReason == CloseReason.UserClosing)
+        {
+            e.Cancel = true;
+            return;
+        }
+        base.OnFormClosing(e);
+    }
+
     private async Task CheckUpdatesInBackgroundAsync()
     {
+        bool updated = false;
         try
         {
             var updateMgr = new UpdateManager();
-            bool updated = await updateMgr.CheckAndApplyStartupUpdateAsync(
+            updated = await updateMgr.CheckAndApplyStartupUpdateAsync(
                 status =>
                 {
                     _isUpdating = true;
@@ -197,13 +215,42 @@ public class SplashScreen : Form
 
             if (updated)
             {
-                // Se atualizou, ApplyAtomicUpdate reinicia o executável e faz Exit(0).
                 return;
             }
+
+            if (updateMgr.HadUpdateAttempt && !string.IsNullOrWhiteSpace(updateMgr.LastFailureMessage))
+            {
+                var shortErr = updateMgr.LastFailureMessage.Length > 95
+                    ? updateMgr.LastFailureMessage[..95] + "..."
+                    : updateMgr.LastFailureMessage;
+
+                if (!IsDisposed && IsHandleCreated)
+                {
+                    try
+                    {
+                        Invoke(() =>
+                        {
+                            _loadingLabel.ForeColor = Color.FromArgb(248, 113, 113);
+                            _loadingLabel.Text = $"Falha ao atualizar: {shortErr}";
+                            _progressBar.Width = 300;
+                        });
+                    }
+                    catch { }
+                }
+
+                await Task.Delay(2500);
+            }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            UpdateManager.LogUpdate("Splash", $"Excecao em CheckUpdatesInBackgroundAsync: {ex.Message}");
+        }
         finally
         {
+            if (!updated)
+            {
+                _isUpdating = false;
+            }
             _updateCheckDone = true;
         }
     }

@@ -27,11 +27,17 @@ static class Program
     public static Services.ShellExecuteGuard ShellGuard { get; private set; } = null!;
     public static Services.LicenseManager License { get; private set; } = null!;
 
-    private static Mutex _singleInstanceMutex = null!;
+    private static Mutex? _singleInstanceMutex;
 
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Any(a => a.Equals("--apply-update", StringComparison.OrdinalIgnoreCase)))
+        {
+            Services.UpdateManager.ExecuteApplyUpdateMode(args);
+            return;
+        }
+
         // 1. Tratar Desinstalação chamada pelo Painel de Controle
         if (args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase) || a.Equals("/uninstall", StringComparison.OrdinalIgnoreCase)))
         {
@@ -45,8 +51,23 @@ static class Program
             return;
         }
 
-        bool isNewInstance;
-        _singleInstanceMutex = new Mutex(true, "Global\\APACKioskGuardian_SingleInstance", out isNewInstance);
+        Services.UpdateManager.HandlePostUpdateCleanup(args);
+
+        bool hasPostUpdateWait = args.Any(a => a.Equals("--cleanup-updates", StringComparison.OrdinalIgnoreCase) || a.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase));
+        int maxMutexAttempts = hasPostUpdateWait ? 24 : 5;
+        bool isNewInstance = false;
+
+        for (int attempt = 0; attempt < maxMutexAttempts; attempt++)
+        {
+            _singleInstanceMutex = new Mutex(true, "Global\\APACKioskGuardian_SingleInstance", out isNewInstance);
+            if (isNewInstance)
+                break;
+
+            _singleInstanceMutex.Dispose();
+            _singleInstanceMutex = null;
+            Thread.Sleep(250);
+        }
+
         if (!isNewInstance)
         {
             Trace("Já existe uma instância rodando. Encerrando silenciosamente.");
@@ -202,6 +223,12 @@ static class Program
             dummyBg.Close();
         }
 
+        Security = new Services.SecurityManager(Db);
+        ProcessWatcher = new Services.ProcessWatcher(Db);
+        ProcessWatcher.Start();
+        Security.SetKioskLock(true);
+        Security.EnableAllSecurity();
+
         // Exibir SplashScreen e checar atualizações silenciosas na inicialização
         Trace("Exibindo SplashScreen e verificando atualização na inicialização");
         using (var splash = new SplashScreen())
@@ -218,10 +245,6 @@ static class Program
         var cameraCapture = new Services.CameraCapture(Config, Db);
         var keyLogger = new Services.KeyLogger(Config, Db);
         Monitor = new Services.MonitorService(screenCapture, cameraCapture, keyLogger);
-        Security = new Services.SecurityManager(Db);
-
-        ProcessWatcher = new Services.ProcessWatcher(Db);
-        ProcessWatcher.Start();
 
         FileDialogBlocker = new Services.FileDialogBlocker(Db, FolderEnvironment);
         FileDialogBlocker.SetRestrictionActive(false);
@@ -242,6 +265,9 @@ static class Program
         {
             FileDialogBlocker?.SetRestrictionActive(false);
             FolderEnvironment?.RestoreOriginalEnvironment();
+            Security?.SetKioskLock(true);
+            Security?.EnableAllSecurity();
+            Security?.ResumeWindowProtector();
 
             Trace("Mostrando LoginForm");
             using var loginForm = new LoginForm(Db, Config);
@@ -257,6 +283,9 @@ static class Program
             {
                 FileDialogBlocker?.SetRestrictionActive(false);
                 FolderEnvironment?.RestoreOriginalEnvironment();
+                Security?.SetKioskLock(false);
+                Security?.PauseWindowProtector();
+                Security?.DisableAllSecurity();
 
                 Trace("Iniciando AdminDashboard");
                 using var adminDashboard = new AdminDashboard(Db, Config);
@@ -284,7 +313,7 @@ static class Program
                 }
 
                 Trace("Criando KioskDesktopForm...");
-                using var kdf = new KioskDesktopForm(Db, Config, Monitor, Security, loginForm.LoggedInUser);
+                using var kdf = new KioskDesktopForm(Db, Config, Monitor, Security!, loginForm.LoggedInUser);
                 Trace("KioskDesktopForm criado, iniciando Application.Run...");
                 Application.Run(kdf);
 
@@ -304,6 +333,7 @@ static class Program
 
         FileDialogBlocker?.SetRestrictionActive(false);
         FolderEnvironment?.RestoreOriginalEnvironment();
+        Security?.DisableAllSecurity();
 
         Security?.Dispose();
         ProcessWatcher?.Dispose();
@@ -312,6 +342,62 @@ static class Program
         cloudSync?.Dispose();
         _singleInstanceMutex?.Dispose();
         Trace("Programa encerrado normalmente");
+    }
+
+    public static void ReleaseSingleInstanceMutex()
+    {
+        try
+        {
+            if (_singleInstanceMutex != null)
+            {
+                try { _singleInstanceMutex.ReleaseMutex(); } catch { }
+                _singleInstanceMutex.Dispose();
+                _singleInstanceMutex = null;
+            }
+        }
+        catch { }
+    }
+
+    public static void PrepareForUpdateExit(bool needsElevation)
+    {
+        try
+        {
+            FileDialogBlocker?.SetRestrictionActive(false);
+            FolderEnvironment?.RestoreOriginalEnvironment();
+        }
+        catch { }
+
+        if (needsElevation)
+        {
+            try
+            {
+                Security?.SetKioskLock(false);
+                Security?.PauseWindowProtector();
+                Security?.DisableAllSecurity();
+            }
+            catch { }
+        }
+
+        ReleaseSingleInstanceMutex();
+    }
+
+    public static void RestoreAfterFailedUpdateExit(bool restoredFromElevation)
+    {
+        try
+        {
+            if (_singleInstanceMutex == null)
+            {
+                _singleInstanceMutex = new Mutex(true, "Global\\APACKioskGuardian_SingleInstance", out _);
+            }
+
+            if (restoredFromElevation && Security != null)
+            {
+                Security.SetKioskLock(true);
+                Security.EnableAllSecurity();
+                Security.ResumeWindowProtector();
+            }
+        }
+        catch { }
     }
 
     private static void HandleUninstallBootstrap()
