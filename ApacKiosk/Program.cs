@@ -22,6 +22,7 @@ static class Program
     public static Services.MonitorService Monitor { get; private set; } = null!;
     public static Services.SecurityManager Security { get; private set; } = null!;
     public static Services.ProcessWatcher ProcessWatcher { get; private set; } = null!;
+    public static Services.UserFolderEnvironmentService FolderEnvironment { get; private set; } = null!;
     public static Services.FileDialogBlocker FileDialogBlocker { get; private set; } = null!;
     public static Services.ShellExecuteGuard ShellGuard { get; private set; } = null!;
     public static Services.LicenseManager License { get; private set; } = null!;
@@ -61,6 +62,7 @@ static class Program
             var ex = e.ExceptionObject as Exception;
             var msg = ex?.ToString() ?? e.ExceptionObject?.ToString();
             try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "ApacKiosk_Crash.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] UnhandledException: {msg}\n"); } catch { }
+            try { FolderEnvironment?.RestoreOriginalEnvironment(); } catch { }
         };
         Application.ThreadException += (s, e) =>
         {
@@ -79,6 +81,17 @@ static class Program
         Db.Initialize();
 
         Config = new Utils.ConfigManager(Db);
+        FolderEnvironment = new Services.UserFolderEnvironmentService(Db);
+        FolderEnvironment.RestoreOriginalEnvironment();
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try
+            {
+                FileDialogBlocker?.SetRestrictionActive(false);
+                FolderEnvironment?.RestoreOriginalEnvironment();
+            }
+            catch { }
+        };
         License = new Services.LicenseManager(Config);
 
         // Garantir registro no Painel de Controle do Windows
@@ -210,7 +223,8 @@ static class Program
         ProcessWatcher = new Services.ProcessWatcher(Db);
         ProcessWatcher.Start();
 
-        FileDialogBlocker = new Services.FileDialogBlocker(Db);
+        FileDialogBlocker = new Services.FileDialogBlocker(Db, FolderEnvironment);
+        FileDialogBlocker.SetRestrictionActive(false);
         FileDialogBlocker.Start();
 
         ShellGuard = new Services.ShellExecuteGuard(Db);
@@ -226,6 +240,9 @@ static class Program
 
         while (true)
         {
+            FileDialogBlocker?.SetRestrictionActive(false);
+            FolderEnvironment?.RestoreOriginalEnvironment();
+
             Trace("Mostrando LoginForm");
             using var loginForm = new LoginForm(Db, Config);
             if (loginForm.ShowDialog() != DialogResult.OK)
@@ -238,6 +255,9 @@ static class Program
 
             if (loginForm.IsAdmin)
             {
+                FileDialogBlocker?.SetRestrictionActive(false);
+                FolderEnvironment?.RestoreOriginalEnvironment();
+
                 Trace("Iniciando AdminDashboard");
                 using var adminDashboard = new AdminDashboard(Db, Config);
                 Application.Run(adminDashboard);
@@ -253,16 +273,23 @@ static class Program
             }
             else if (loginForm.LoggedInUser != null)
             {
+                FolderEnvironment?.ApplyUserIsolation(loginForm.LoggedInUser.Username);
+
                 if (FileDialogBlocker != null)
                 {
                     FileDialogBlocker.CurrentUsername = loginForm.LoggedInUser.Username;
+                    FileDialogBlocker.UserFolderPath = FolderEnvironment?.CurrentUserFolder ?? "";
                     FileDialogBlocker.EnsureUserFolderExists();
+                    FileDialogBlocker.SetRestrictionActive(true);
                 }
 
                 Trace("Criando KioskDesktopForm...");
                 using var kdf = new KioskDesktopForm(Db, Config, Monitor, Security, loginForm.LoggedInUser);
                 Trace("KioskDesktopForm criado, iniciando Application.Run...");
                 Application.Run(kdf);
+
+                FileDialogBlocker?.SetRestrictionActive(false);
+                FolderEnvironment?.RestoreOriginalEnvironment();
 
                 if (kdf.LogoutRequested)
                 {
@@ -274,6 +301,9 @@ static class Program
                 break;
             }
         }
+
+        FileDialogBlocker?.SetRestrictionActive(false);
+        FolderEnvironment?.RestoreOriginalEnvironment();
 
         Security?.Dispose();
         ProcessWatcher?.Dispose();

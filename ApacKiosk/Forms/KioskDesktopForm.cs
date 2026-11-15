@@ -546,10 +546,46 @@ namespace ApacKiosk.Forms
             _monitor?.StopAll();
             _security?.PauseWindowProtector();
             EndSession();
+            CleanupSessionProgramsAndIsolation();
             _trayIcon.Visible = false;
             _trayIcon.Dispose();
             DialogResult = DialogResult.OK;
             Close();
+        }
+
+        private void CleanupSessionProgramsAndIsolation()
+        {
+            try
+            {
+                foreach (var kv in _runningPrograms.ToList())
+                {
+                    try
+                    {
+                        var proc = kv.Value;
+                        if (proc != null && !proc.HasExited)
+                        {
+                            proc.Kill(true);
+                        }
+                    }
+                    catch { }
+                }
+                _runningPrograms.Clear();
+                _launchedProcess = null!;
+                _launchedWindowHandle = IntPtr.Zero;
+            }
+            catch { }
+
+            try
+            {
+                Program.FileDialogBlocker?.SetRestrictionActive(false);
+            }
+            catch { }
+
+            try
+            {
+                Program.FolderEnvironment?.RestoreOriginalEnvironment();
+            }
+            catch { }
         }
 
         private void SetupTrayIcon()
@@ -969,9 +1005,15 @@ namespace ApacKiosk.Forms
 
                 StopFocusEnforcement();
 
+                var userFolder = Program.FolderEnvironment?.CurrentUserFolder;
+                var workingDir = !string.IsNullOrWhiteSpace(userFolder) && Directory.Exists(userFolder)
+                    ? userFolder
+                    : "";
+
                 var psi = new ProcessStartInfo(path)
                 {
                     Arguments = args ?? "",
+                    WorkingDirectory = workingDir,
                     UseShellExecute = true
                 };
                 var proc = Process.Start(psi);
@@ -1503,6 +1545,7 @@ namespace ApacKiosk.Forms
                     _isShuttingDown = true;
                     _safetyTimer?.Stop();
                     EndSession();
+                    CleanupSessionProgramsAndIsolation();
                     _monitor?.StopAll();
                     _security?.DisableAllSecurity();
                     _trayIcon.Visible = false;
