@@ -312,7 +312,10 @@ public class InstallerForm : Form
 
         CleanupQuietly(Path.Combine(TargetDir, "ApacKiosk.old.exe"));
 
-        report((80, "Criando atalhos na Área de Trabalho e Menu Iniciar..."));
+        report((78, "Configurando atualizações automáticas sem UAC..."));
+        InstallUpdateServiceSilently();
+
+        report((83, "Criando atalhos na Área de Trabalho e Menu Iniciar..."));
         CreateShortcuts();
 
         report((88, "Configurando inicialização automática do Windows..."));
@@ -355,7 +358,8 @@ public class InstallerForm : Form
                     string name = p.ProcessName;
                     if (name.Equals("ApacKiosk", StringComparison.OrdinalIgnoreCase) ||
                         name.StartsWith("ApacKiosk_v", StringComparison.OrdinalIgnoreCase) ||
-                        name.Equals("ApacKioskUninstall", StringComparison.OrdinalIgnoreCase))
+                        name.Equals("ApacKioskUninstall", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("ApacUpdaterHost", StringComparison.OrdinalIgnoreCase))
                     {
                         p.Kill();
                         p.WaitForExit(3000);
@@ -364,6 +368,24 @@ public class InstallerForm : Form
                 catch { }
                 finally { p.Dispose(); }
             }
+        }
+        catch { }
+    }
+
+    private static void InstallUpdateServiceSilently()
+    {
+        try
+        {
+            if (!File.Exists(TargetExe)) return;
+            using var proc = Process.Start(new ProcessStartInfo
+            {
+                FileName = TargetExe,
+                Arguments = $"--install-update-service \"{TargetExe}\"",
+                WorkingDirectory = TargetDir,
+                CreateNoWindow = true,
+                UseShellExecute = false
+            });
+            proc?.WaitForExit(20000);
         }
         catch { }
     }

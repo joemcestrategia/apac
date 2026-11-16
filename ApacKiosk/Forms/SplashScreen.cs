@@ -24,15 +24,12 @@ public class SplashScreen : Form
     private Panel _progressBar = null!;
     private Label _loadingLabel = null!;
     private Label _devLabel = null!;
-    private TextBox _txtUpdateLog = null!;
     private Button _btnRetryUpdate = null!;
     private Button _btnSkipUpdate = null!;
 
     private volatile bool _isUpdating;
     private volatile bool _updateCheckDone;
     private volatile bool _hasFatalUpdateFailure;
-    private bool _expandedForUpdate;
-    private Action<string>? _logHandler;
 
     public SplashScreen()
     {
@@ -141,34 +138,19 @@ public class SplashScreen : Form
         _loadingLabel = new Label
         {
             Text = "Verificando integridade e atualizações...",
-            Font = new Font("Segoe UI", 9),
+            Font = new Font("Segoe UI", 9.5f),
             ForeColor = Color.FromArgb(140, 140, 180),
             TextAlign = ContentAlignment.MiddleCenter,
-            Size = new Size(460, 24),
-            Location = new Point(20, 284),
+            Size = new Size(460, 38),
+            Location = new Point(20, 282),
             BackColor = Color.Transparent
         };
 
-        _txtUpdateLog = new TextBox
-        {
-            Location = new Point(30, 326),
-            Size = new Size(560, 142),
-            Multiline = true,
-            ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            WordWrap = true,
-            BackColor = Color.FromArgb(9, 11, 24),
-            ForeColor = Color.FromArgb(205, 215, 235),
-            BorderStyle = BorderStyle.FixedSingle,
-            Font = new Font("Consolas", 8.25f),
-            Visible = false
-        };
-
-        _btnRetryUpdate = CreateButton("🔄 Tentar Novamente", new Point(110, 480), new Size(190, 36), Color.FromArgb(16, 185, 129));
+        _btnRetryUpdate = CreateButton("🔄 Tentar Novamente", new Point(62, 330), new Size(175, 34), Color.FromArgb(16, 185, 129));
         _btnRetryUpdate.Visible = false;
         _btnRetryUpdate.Click += async (_, _) => await RetryStartupUpdateAsync();
 
-        _btnSkipUpdate = CreateButton("➡ Avançar para o Login", new Point(320, 480), new Size(200, 36), Color.FromArgb(75, 85, 110));
+        _btnSkipUpdate = CreateButton("➡ Avançar para o Login", new Point(252, 330), new Size(186, 34), Color.FromArgb(75, 85, 110));
         _btnSkipUpdate.Visible = false;
         _btnSkipUpdate.Click += (_, _) =>
         {
@@ -187,22 +169,19 @@ public class SplashScreen : Form
             ForeColor = Color.FromArgb(70, 70, 100),
             TextAlign = ContentAlignment.MiddleCenter,
             Size = new Size(460, 20),
-            Location = new Point(20, 380),
+            Location = new Point(20, 382),
             BackColor = Color.Transparent
         };
 
         _centerCard.Controls.AddRange(new Control[] {
             _logoBox, _titleLabel, _accentLine, _mottoLabel,
             _disciplineLabel, _progressBg, _loadingLabel,
-            _txtUpdateLog, _btnRetryUpdate, _btnSkipUpdate, _devLabel
+            _btnRetryUpdate, _btnSkipUpdate, _devLabel
         });
 
         Controls.Add(_centerCard);
 
         Layout += (_, _) => CenterCard();
-
-        _logHandler = line => AppendLogSafe(line);
-        UpdateManager.OnUpdateLog += _logHandler;
 
         Shown += async (_, _) =>
         {
@@ -213,15 +192,6 @@ public class SplashScreen : Form
             _timer.Start();
             await CheckUpdatesInBackgroundAsync();
         };
-
-        FormClosed += (_, _) =>
-        {
-            if (_logHandler != null)
-            {
-                UpdateManager.OnUpdateLog -= _logHandler;
-                _logHandler = null;
-            }
-        };
     }
 
     private void CenterCard()
@@ -230,43 +200,6 @@ public class SplashScreen : Form
             Math.Max(0, (ClientSize.Width - _centerCard.Width) / 2),
             Math.Max(0, (ClientSize.Height - _centerCard.Height) / 2)
         );
-    }
-
-    private void ExpandForDetailedUpdate()
-    {
-        if (_expandedForUpdate || IsDisposed) return;
-        _expandedForUpdate = true;
-
-        _centerCard.Size = new Size(620, 560);
-        _logoBox.Location = new Point(255, 22);
-        _titleLabel.Size = new Size(580, 38);
-        _titleLabel.Location = new Point(20, 138);
-        _accentLine.Location = new Point(270, 178);
-        _mottoLabel.Size = new Size(580, 22);
-        _mottoLabel.Location = new Point(20, 188);
-        _disciplineLabel.Size = new Size(580, 22);
-        _disciplineLabel.Location = new Point(20, 212);
-
-        _progressBg.Region = null;
-        _progressBg.Size = new Size(560, 8);
-        _progressBg.Location = new Point(30, 248);
-
-        _loadingLabel.Size = new Size(560, 42);
-        _loadingLabel.Location = new Point(30, 264);
-        _loadingLabel.TextAlign = ContentAlignment.MiddleCenter;
-
-        _txtUpdateLog.Location = new Point(30, 314);
-        _txtUpdateLog.Size = new Size(560, 152);
-        _txtUpdateLog.Visible = true;
-
-        _btnRetryUpdate.Location = new Point(105, 480);
-        _btnSkipUpdate.Location = new Point(320, 480);
-
-        _devLabel.Size = new Size(580, 20);
-        _devLabel.Location = new Point(20, 528);
-
-        CenterCard();
-        _centerCard.Invalidate();
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -289,7 +222,7 @@ public class SplashScreen : Form
         _progressBar.BackColor = Color.FromArgb(124, 58, 237);
         _progressBar.Width = 0;
         _loadingLabel.ForeColor = Color.FromArgb(167, 139, 250);
-        _loadingLabel.Text = "Reiniciando verificação de atualização...";
+        _loadingLabel.Text = "Verificando atualizações...";
         if (!_timer.Enabled) _timer.Start();
         await CheckUpdatesInBackgroundAsync();
     }
@@ -314,10 +247,6 @@ public class SplashScreen : Form
                         {
                             Invoke(() =>
                             {
-                                if (info.Stage is "Download" or "Verify" or "Apply" or "Error")
-                                {
-                                    ExpandForDetailedUpdate();
-                                }
                                 if (!string.IsNullOrWhiteSpace(info.Title))
                                 {
                                     _loadingLabel.ForeColor = info.Stage == "Error"
@@ -375,12 +304,11 @@ public class SplashScreen : Form
                     {
                         Invoke(() =>
                         {
-                            ExpandForDetailedUpdate();
                             _timer.Stop();
                             _progressBar.BackColor = Color.FromArgb(239, 68, 68);
                             _progressBar.Width = _progressBg.Width;
                             _loadingLabel.ForeColor = Color.FromArgb(248, 113, 113);
-                            _loadingLabel.Text = $"Falha ao atualizar: {updateMgr.LastFailureMessage}";
+                            _loadingLabel.Text = "Não foi possível concluir a atualização automática.";
                             _btnRetryUpdate.Visible = true;
                             _btnSkipUpdate.Visible = true;
                         });
@@ -422,20 +350,6 @@ public class SplashScreen : Form
             DialogResult = DialogResult.OK;
             Close();
         }
-    }
-
-    private void AppendLogSafe(string line)
-    {
-        if (IsDisposed || !IsHandleCreated) return;
-        try
-        {
-            BeginInvoke(() =>
-            {
-                if (IsDisposed || _txtUpdateLog.IsDisposed) return;
-                _txtUpdateLog.AppendText(line + Environment.NewLine);
-            });
-        }
-        catch { }
     }
 
     private static Button CreateButton(string text, Point location, Size size, Color backColor)

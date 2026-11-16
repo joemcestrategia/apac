@@ -1,11 +1,11 @@
 using System;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using ApacKiosk.Database;
 using ApacKiosk.Services;
 
 namespace ApacKiosk.Forms;
@@ -15,6 +15,10 @@ public class UpdaterStatusForm : Form
     private readonly string _targetExe;
     private readonly int _waitPid;
     private readonly bool _waitForBootConfirmation;
+    private readonly bool _useServiceMode;
+    private readonly string _targetVersion;
+    private readonly string _expectedSha;
+    private readonly string _readyToken;
 
     private Panel _centerCard = null!;
     private Label _lblTitle = null!;
@@ -23,24 +27,33 @@ public class UpdaterStatusForm : Form
     private Label _lblPercent = null!;
     private Panel _progressBg = null!;
     private Panel _progressBar = null!;
-    private TextBox _txtLog = null!;
     private Panel _errorPanel = null!;
     private Label _lblError = null!;
     private Button _btnRetry = null!;
-    private Button _btnCopyLog = null!;
     private Button _btnLaunchTarget = null!;
     private Button _btnClose = null!;
 
+    private SecurityManager? _localSecurity;
     private volatile bool _isBusy = true;
-    private Action<string>? _logHandler;
 
     public int ExitCode { get; private set; } = 1;
 
-    public UpdaterStatusForm(string targetExe, int waitPid, bool waitForBootConfirmation = true)
+    public UpdaterStatusForm(
+        string targetExe,
+        int waitPid,
+        bool waitForBootConfirmation = true,
+        bool useServiceMode = false,
+        string? targetVersion = null,
+        string? expectedSha = null,
+        string? readyToken = null)
     {
         _targetExe = targetExe;
         _waitPid = waitPid;
         _waitForBootConfirmation = waitForBootConfirmation;
+        _useServiceMode = useServiceMode;
+        _targetVersion = targetVersion ?? "";
+        _expectedSha = expectedSha ?? "";
+        _readyToken = readyToken ?? "";
         InitializeComponent();
     }
 
@@ -59,10 +72,10 @@ public class UpdaterStatusForm : Form
 
         _centerCard = new Panel
         {
-            Size = new Size(680, 480),
+            Size = new Size(560, 290),
             BackColor = Color.FromArgb(14, 17, 36)
         };
-        _centerCard.Paint += (s, ev) =>
+        _centerCard.Paint += (_, ev) =>
         {
             using var pen = new Pen(Color.FromArgb(55, 58, 92), 1);
             ev.Graphics.DrawRectangle(pen, 0, 0, _centerCard.Width - 1, _centerCard.Height - 1);
@@ -70,32 +83,33 @@ public class UpdaterStatusForm : Form
 
         _lblTitle = new Label
         {
-            Text = "Instalando Atualização do Sistema",
+            Text = "Atualizando o APAC Kiosk Guardian",
             Font = new Font("Segoe UI", 17, FontStyle.Bold),
             ForeColor = Color.White,
-            Location = new Point(28, 22),
-            Size = new Size(624, 34),
+            TextAlign = ContentAlignment.MiddleCenter,
+            Location = new Point(24, 30),
+            Size = new Size(512, 36),
             BackColor = Color.Transparent
         };
 
         _lblSubtitle = new Label
         {
-            Text = $"Destino: {_targetExe}",
-            Font = new Font("Segoe UI", 9),
-            ForeColor = Color.FromArgb(150, 155, 190),
-            Location = new Point(28, 58),
-            Size = new Size(624, 20),
-            AutoEllipsis = true,
+            Text = "Por favor, aguarde. O sistema reiniciará automaticamente.",
+            Font = new Font("Segoe UI", 10),
+            ForeColor = Color.FromArgb(155, 160, 195),
+            TextAlign = ContentAlignment.MiddleCenter,
+            Location = new Point(24, 70),
+            Size = new Size(512, 24),
             BackColor = Color.Transparent
         };
 
         _lblStep = new Label
         {
-            Text = "Iniciando processo de atualização...",
+            Text = "Preparando instalação...",
             Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(167, 139, 250),
-            Location = new Point(28, 88),
-            Size = new Size(540, 24),
+            Location = new Point(36, 118),
+            Size = new Size(420, 24),
             BackColor = Color.Transparent
         };
 
@@ -105,15 +119,15 @@ public class UpdaterStatusForm : Form
             Font = new Font("Segoe UI", 10.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(220, 220, 245),
             TextAlign = ContentAlignment.MiddleRight,
-            Location = new Point(575, 88),
-            Size = new Size(77, 24),
+            Location = new Point(458, 118),
+            Size = new Size(66, 24),
             BackColor = Color.Transparent
         };
 
         _progressBg = new Panel
         {
-            Size = new Size(624, 10),
-            Location = new Point(28, 118),
+            Size = new Size(488, 10),
+            Location = new Point(36, 150),
             BackColor = Color.FromArgb(35, 38, 66)
         };
 
@@ -125,76 +139,39 @@ public class UpdaterStatusForm : Form
         };
         _progressBg.Controls.Add(_progressBar);
 
-        var lblLogTitle = new Label
-        {
-            Text = "Status e Log em Tempo Real:",
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
-            ForeColor = Color.FromArgb(190, 195, 225),
-            Location = new Point(28, 138),
-            Size = new Size(300, 20),
-            BackColor = Color.Transparent
-        };
-
-        _txtLog = new TextBox
-        {
-            Location = new Point(28, 162),
-            Size = new Size(624, 195),
-            Multiline = true,
-            ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            WordWrap = true,
-            BackColor = Color.FromArgb(9, 11, 24),
-            ForeColor = Color.FromArgb(205, 215, 235),
-            BorderStyle = BorderStyle.FixedSingle,
-            Font = new Font("Consolas", 8.5f)
-        };
-
         _errorPanel = new Panel
         {
-            Location = new Point(28, 366),
-            Size = new Size(624, 54),
+            Location = new Point(36, 174),
+            Size = new Size(488, 52),
             BackColor = Color.FromArgb(65, 20, 28),
             Visible = false
         };
         _lblError = new Label
         {
             Location = new Point(10, 6),
-            Size = new Size(604, 42),
+            Size = new Size(468, 40),
             Font = new Font("Segoe UI", 9, FontStyle.Bold),
             ForeColor = Color.FromArgb(254, 202, 202),
             BackColor = Color.Transparent
         };
         _errorPanel.Controls.Add(_lblError);
 
-        _btnRetry = CreateActionButton("🔄 Tentar Novamente", new Point(28, 428), new Size(165, 36), Color.FromArgb(16, 185, 129));
+        _btnRetry = CreateActionButton("🔄 Tentar Novamente", new Point(36, 238), new Size(170, 36), Color.FromArgb(16, 185, 129));
         _btnRetry.Visible = false;
         _btnRetry.Click += async (_, _) => await RunUpdateCycleAsync();
 
-        _btnCopyLog = CreateActionButton("📋 Copiar Log", new Point(203, 428), new Size(130, 36), Color.FromArgb(59, 130, 246));
-        _btnCopyLog.Visible = false;
-        _btnCopyLog.Click += (_, _) =>
-        {
-            try
-            {
-                Clipboard.SetText(_txtLog.Text);
-                _lblStep.Text = "Log copiado para a área de transferência.";
-            }
-            catch { }
-        };
-
-        _btnLaunchTarget = CreateActionButton("▶ Abrir Sistema Anterior", new Point(343, 428), new Size(185, 36), Color.FromArgb(124, 58, 237));
+        _btnLaunchTarget = CreateActionButton("▶ Abrir Sistema", new Point(216, 238), new Size(160, 36), Color.FromArgb(124, 58, 237));
         _btnLaunchTarget.Visible = false;
         _btnLaunchTarget.Click += (_, _) => LaunchTargetAndClose();
 
-        _btnClose = CreateActionButton("Fechar", new Point(538, 428), new Size(114, 36), Color.FromArgb(75, 85, 99));
+        _btnClose = CreateActionButton("Fechar", new Point(386, 238), new Size(138, 36), Color.FromArgb(75, 85, 99));
         _btnClose.Visible = false;
         _btnClose.Click += (_, _) => Close();
 
         _centerCard.Controls.AddRange(new Control[]
         {
             _lblTitle, _lblSubtitle, _lblStep, _lblPercent,
-            _progressBg, lblLogTitle, _txtLog, _errorPanel,
-            _btnRetry, _btnCopyLog, _btnLaunchTarget, _btnClose
+            _progressBg, _errorPanel, _btnRetry, _btnLaunchTarget, _btnClose
         });
 
         Controls.Add(_centerCard);
@@ -207,18 +184,43 @@ public class UpdaterStatusForm : Form
             );
         };
 
-        _logHandler = line => AppendLogSafe(line);
-        UpdateManager.OnUpdateLog += _logHandler;
+        Shown += async (_, _) =>
+        {
+            ActivateKioskScreenLock();
+            if (!string.IsNullOrWhiteSpace(_readyToken))
+            {
+                UpdateManager.SignalUiReady(_readyToken);
+            }
+            await RunUpdateCycleAsync();
+        };
 
-        Shown += async (_, _) => await RunUpdateCycleAsync();
         FormClosed += (_, _) =>
         {
-            if (_logHandler != null)
+            try
             {
-                UpdateManager.OnUpdateLog -= _logHandler;
-                _logHandler = null;
+                _localSecurity?.ShutdownPreservingLock();
+                _localSecurity = null;
             }
+            catch { }
         };
+    }
+
+    private void ActivateKioskScreenLock()
+    {
+        try
+        {
+            if (!_useServiceMode) return;
+            string dbPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "ApacKiosk", "apac.db");
+            var db = new DatabaseManager(dbPath);
+            _localSecurity = new SecurityManager(db);
+            _localSecurity.SetMainWindow(Handle);
+            _localSecurity.SetKioskLock(true);
+            _localSecurity.EnableAllSecurity();
+            _localSecurity.ForceHideTaskbar();
+        }
+        catch { }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
@@ -239,17 +241,31 @@ public class UpdaterStatusForm : Form
         UpdateProgressUI(new UpdateProgressInfo
         {
             Stage = "Updater",
-            Title = "Preparando substituição de arquivos...",
-            Percent = 5
+            Title = "Aplicando atualização do sistema...",
+            Percent = 10
         });
 
-        var result = await Task.Run(() =>
-            UpdateManager.RunApplyUpdateCore(
+        UpdateManager.ApplyUpdateResult result = await Task.Run(() =>
+        {
+            if (_useServiceMode)
+            {
+                return UpdateManager.RunServiceUpdateUiCore(
+                    _targetExe,
+                    _waitPid,
+                    _targetVersion,
+                    _expectedSha,
+                    info => UpdateProgressUI(info),
+                    newPid => _localSecurity?.RegisterAllowedProcess(newPid),
+                    CancellationToken.None);
+            }
+
+            return UpdateManager.RunApplyUpdateCore(
                 _targetExe,
                 _waitPid,
                 _waitForBootConfirmation,
                 info => UpdateProgressUI(info),
-                CancellationToken.None));
+                CancellationToken.None);
+        });
 
         if (result.Success)
         {
@@ -259,10 +275,11 @@ public class UpdaterStatusForm : Form
             UpdateProgressUI(new UpdateProgressInfo
             {
                 Stage = "Done",
-                Title = result.Summary,
+                Title = "Atualização concluída! Reiniciando...",
                 Percent = 100
             });
-            await Task.Delay(450);
+            await Task.Delay(350);
+            _localSecurity?.ShutdownPreservingLock();
             if (!IsDisposed) Close();
             return;
         }
@@ -271,11 +288,11 @@ public class UpdaterStatusForm : Form
         _isBusy = false;
         _progressBar.BackColor = Color.FromArgb(239, 68, 68);
         _lblStep.ForeColor = Color.FromArgb(248, 113, 113);
-        _lblStep.Text = "Falha na instalação da atualização";
-        string errText = result.RolledBack
-            ? $"{result.Summary} (A versão anterior foi restaurada automaticamente.)"
-            : result.Summary;
-        SetErrorMode(true, errText);
+        _lblStep.Text = "Não foi possível concluir a atualização";
+        string friendlyErr = result.RolledBack
+            ? "A atualização falhou e a versão anterior foi restaurada com segurança."
+            : "Ocorreu uma falha durante a instalação. Tente novamente ou abra o sistema.";
+        SetErrorMode(true, friendlyErr);
     }
 
     private void UpdateProgressUI(UpdateProgressInfo info)
@@ -291,7 +308,7 @@ public class UpdaterStatusForm : Form
                     _lblStep.ForeColor = info.Stage == "Done"
                         ? Color.FromArgb(52, 211, 153)
                         : Color.FromArgb(167, 139, 250);
-                    _lblStep.Text = info.Title;
+                    _lblStep.Text = ToFriendlyStepTitle(info.Title);
                 }
                 if (info.Percent >= 0)
                 {
@@ -304,18 +321,11 @@ public class UpdaterStatusForm : Form
         catch { }
     }
 
-    private void AppendLogSafe(string line)
+    private static string ToFriendlyStepTitle(string rawTitle)
     {
-        if (IsDisposed || !IsHandleCreated) return;
-        try
-        {
-            BeginInvoke(() =>
-            {
-                if (IsDisposed || _txtLog.IsDisposed) return;
-                _txtLog.AppendText(line + Environment.NewLine);
-            });
-        }
-        catch { }
+        if (rawTitle.Contains("PID", StringComparison.OrdinalIgnoreCase))
+            return "Finalizando versão anterior...";
+        return rawTitle;
     }
 
     private void SetErrorMode(bool hasError, string errorMsg)
@@ -323,9 +333,8 @@ public class UpdaterStatusForm : Form
         _errorPanel.Visible = hasError;
         _lblError.Text = errorMsg;
         _btnRetry.Visible = hasError;
-        _btnCopyLog.Visible = hasError;
         _btnLaunchTarget.Visible = hasError && File.Exists(_targetExe);
-        _btnClose.Visible = hasError;
+        _btnClose.Visible = hasError && !_useServiceMode;
     }
 
     private void LaunchTargetAndClose()
@@ -334,15 +343,20 @@ public class UpdaterStatusForm : Form
         {
             if (File.Exists(_targetExe))
             {
-                Process.Start(new ProcessStartInfo
+                var proc = Process.Start(new ProcessStartInfo
                 {
                     FileName = _targetExe,
                     WorkingDirectory = Path.GetDirectoryName(_targetExe) ?? "",
                     UseShellExecute = true
                 });
+                if (proc != null)
+                {
+                    _localSecurity?.RegisterAllowedProcess(proc.Id);
+                }
             }
         }
         catch { }
+        _localSecurity?.ShutdownPreservingLock();
         Close();
     }
 

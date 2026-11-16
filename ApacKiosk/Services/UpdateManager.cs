@@ -146,7 +146,7 @@ public class UpdateManager
             Report(progressCallback, "Apply", "Aplicando atualização e reiniciando...", 100);
             LogUpdate("Startup", $"Download concluido e validado em '{tempExeOrError}'. Chamando ApplyAtomicUpdate...");
 
-            if (!ApplyAtomicUpdate(tempExeOrError, out var applyError, beforeElevationPrompt))
+            if (!ApplyAtomicUpdate(tempExeOrError, out var applyError, beforeElevationPrompt, updateInfo.LatestVersion, updateInfo.Sha256))
             {
                 LastFailureStage = "Apply";
                 LastFailureMessage = applyError ?? "Não foi possível iniciar o instalador da atualização.";
@@ -180,6 +180,15 @@ public class UpdateManager
             LogUpdate("Check", $"Resposta GitHub API: HTTP {(int)response.StatusCode} ({response.StatusCode})");
             if (!response.IsSuccessStatusCode)
             {
+                if ((int)response.StatusCode is 403 or 429)
+                {
+                    var fallback = await TryCheckViaWebRedirectAsync(currentVersion, cancellationToken);
+                    if (fallback != null)
+                    {
+                        LastCheckResult = fallback;
+                        return fallback;
+                    }
+                }
                 LastCheckError = $"Servidor retornou HTTP {(int)response.StatusCode} ({response.StatusCode}).";
                 return null;
             }
@@ -354,7 +363,7 @@ public class UpdateManager
         }
 
         Report(progressCallback, "Apply", "Iniciando instalador de atualização...", 100);
-        bool applied = ApplyAtomicUpdate(tempExeOrError, out var applyErr, beforeElevationPrompt);
+        bool applied = ApplyAtomicUpdate(tempExeOrError, out var applyErr, beforeElevationPrompt, updateInfo.LatestVersion, updateInfo.Sha256);
         if (!applied)
         {
             LastFailureStage = "Apply";
@@ -531,12 +540,17 @@ public class UpdateManager
         }
     }
 
-    public static bool ApplyAtomicUpdate(string newExePath) => ApplyAtomicUpdate(newExePath, out _, null);
+    public static bool ApplyAtomicUpdate(string newExePath) => ApplyAtomicUpdate(newExePath, out _, null, null, null);
 
     public static bool ApplyAtomicUpdate(string newExePath, out string? errorMessage) =>
-        ApplyAtomicUpdate(newExePath, out errorMessage, null);
+        ApplyAtomicUpdate(newExePath, out errorMessage, null, null, null);
 
-    public static bool ApplyAtomicUpdate(string newExePath, out string? errorMessage, Action<bool>? beforeElevationPrompt)
+    public static bool ApplyAtomicUpdate(
+        string newExePath,
+        out string? errorMessage,
+        Action<bool>? beforeElevationPrompt,
+        string? targetVersion = null,
+        string? expectedSha256 = null)
     {
         errorMessage = null;
         try
@@ -560,13 +574,59 @@ public class UpdateManager
             bool isAdmin = IsAdministrator();
             bool canWrite = CanWriteToDirectory(currentDir);
             int currentPid = Environment.ProcessId;
+            bool useServiceWithoutUac = !canWrite && WindowsUpdaterService.IsServiceRunning();
 
-            LogUpdate("Apply", $"Preparando aplicacao da atualizacao. Alvo='{currentExe}', Novo='{newExePath}', PID={currentPid}, IsAdmin={isAdmin}, CanWriteDir={canWrite}");
+            LogUpdate("Apply", $"Preparando aplicacao da atualizacao. Alvo='{currentExe}', Novo='{newExePath}', PID={currentPid}, IsAdmin={isAdmin}, CanWriteDir={canWrite}, UseServiceNoUac={useServiceWithoutUac}");
+
+            if (useServiceWithoutUac)
+            {
+                string sha = string.IsNullOrWhiteSpace(expectedSha256) ? ComputeSha256Static(newExePath) : expectedSha256;
+                string readyToken = Guid.NewGuid().ToString("N");
+                string readyFlag = GetUiReadyFlagPath(readyToken);
+                CleanupFileQuietly(readyFlag);
+
+                var svcUiPsi = new ProcessStartInfo
+                {
+                    FileName = newExePath,
+                    Arguments = $"--service-update-ui \"{currentExe}\" --wait-pid={currentPid} --target-version=\"{targetVersion ?? ""}\" --expected-sha=\"{sha}\" --ready-token={readyToken}",
+                    WorkingDirectory = Path.GetDirectoryName(newExePath) ?? Path.GetTempPath(),
+                    UseShellExecute = true
+                };
+
+                var uiProc = Process.Start(svcUiPsi);
+                if (uiProc == null)
+                {
+                    errorMessage = "Não foi possível iniciar a interface de atualização sem UAC.";
+                    LogUpdateError("Apply", errorMessage);
+                    return false;
+                }
+
+                Program.Security?.RegisterAllowedProcess(uiProc.Id);
+                LogUpdate("Apply", $"Interface sem UAC iniciada (PID={uiProc.Id}). Aguardando bloqueio de tela...");
+
+                var waitReadySw = Stopwatch.StartNew();
+                while (waitReadySw.Elapsed.TotalSeconds < 6)
+                {
+                    if (File.Exists(readyFlag))
+                    {
+                        CleanupFileQuietly(readyFlag);
+                        break;
+                    }
+                    if (uiProc.HasExited)
+                        break;
+                    Thread.Sleep(50);
+                }
+
+                Program.PrepareForServiceUiTransition();
+                LogUpdate("Apply", $"Transicao de tela segura concluida. Encerrando processo antigo PID={currentPid} sem UAC...");
+                Environment.Exit(0);
+                return true;
+            }
 
             bool needsElevation = !canWrite;
             if (needsElevation)
             {
-                LogUpdate("Apply", "Pasta de instalacao protegida; solicitando elevacao (UAC) antes de iniciar updater.");
+                LogUpdate("Apply", "Pasta protegida e servico ausente; solicitando elevacao (UAC) unica para instalar e registrar servico.");
                 beforeElevationPrompt?.Invoke(true);
             }
 
@@ -623,6 +683,102 @@ public class UpdateManager
             errorMessage = ex.Message;
             LogUpdateError("Apply", $"ApplyAtomicUpdate error: {ex}");
             return false;
+        }
+    }
+
+    public static int ExecuteServiceUpdateUiMode(string[] args)
+    {
+        try
+        {
+            string targetExe = "";
+            string targetVersion = "";
+            string expectedSha = "";
+            string readyToken = "";
+            int waitPid = 0;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i].Equals("--service-update-ui", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length && !args[i + 1].StartsWith("--"))
+                    targetExe = args[i + 1].Trim('"');
+                else if (args[i].StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase))
+                    int.TryParse(args[i].Substring("--wait-pid=".Length), out waitPid);
+                else if (args[i].StartsWith("--target-version=", StringComparison.OrdinalIgnoreCase))
+                    targetVersion = args[i].Substring("--target-version=".Length).Trim('"');
+                else if (args[i].StartsWith("--expected-sha=", StringComparison.OrdinalIgnoreCase))
+                    expectedSha = args[i].Substring("--expected-sha=".Length).Trim('"');
+                else if (args[i].StartsWith("--ready-token=", StringComparison.OrdinalIgnoreCase))
+                    readyToken = args[i].Substring("--ready-token=".Length).Trim('"');
+            }
+
+            ApplicationConfiguration.Initialize();
+            Application.SetHighDpiMode(HighDpiMode.SystemAware);
+            using var form = new UpdaterStatusForm(targetExe, waitPid, true, useServiceMode: true, targetVersion, expectedSha, readyToken);
+            Application.Run(form);
+            return form.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            LogUpdateError("UpdaterUI", $"Erro fatal em ExecuteServiceUpdateUiMode: {ex}");
+            return 1;
+        }
+    }
+
+    public static void SignalUiReady(string? readyToken)
+    {
+        if (string.IsNullOrWhiteSpace(readyToken)) return;
+        try
+        {
+            string path = GetUiReadyFlagPath(readyToken);
+            var dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.WriteAllText(path, $"UI_READY PID={Environment.ProcessId}");
+        }
+        catch { }
+    }
+
+    public static ApplyUpdateResult RunServiceUpdateUiCore(
+        string targetExe,
+        int waitPid,
+        string targetVersion,
+        string expectedSha,
+        Action<UpdateProgressInfo>? progress,
+        Action<int>? onTargetStarted,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            string selfExe = Process.GetCurrentProcess().MainModule?.FileName ?? Application.ExecutablePath;
+            LogUpdate("UpdaterUI", $"Iniciando aplicacao via servico (sem UAC). Self='{selfExe}', Target='{targetExe}', WaitPID={waitPid}, Version='{targetVersion}'");
+
+            if (waitPid > 0 && waitPid != Environment.ProcessId)
+            {
+                Report(progress, "Updater", "Finalizando instância anterior...", 15);
+                WaitForProcessExit(waitPid, 6000);
+            }
+
+            Report(progress, "Updater", "Instalando atualização com segurança...", 45);
+            var resp = WindowsUpdaterService.ApplyUpdateViaService(targetExe, selfExe, targetVersion, expectedSha, waitPid);
+            if (resp == null || !resp.Ok)
+            {
+                string err = resp?.Error ?? "Serviço de atualização indisponível.";
+                LogUpdateError("UpdaterUI", $"Servico retornou erro no APPLY: {err}");
+                return new ApplyUpdateResult(false, 2, err);
+            }
+
+            return LaunchTargetAndWaitBootConfirmation(
+                targetExe,
+                true,
+                progress,
+                onTargetStarted,
+                () => WindowsUpdaterService.RollbackViaService(targetExe)?.Ok == true,
+                () => WindowsUpdaterService.CleanupBackupViaService(targetExe),
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            LogUpdateError("UpdaterUI", $"Erro em RunServiceUpdateUiCore: {ex}");
+            bool rolled = WindowsUpdaterService.RollbackViaService(targetExe)?.Ok == true;
+            return new ApplyUpdateResult(false, 1, ex.Message, rolled);
         }
     }
 
@@ -787,85 +943,24 @@ public class UpdateManager
                 return new ApplyUpdateResult(false, 2, $"Não foi possível substituir '{targetExe}': {errDetail}", rolledBack);
             }
 
-            string bootToken = Guid.NewGuid().ToString("N");
-            string bootFlagPath = GetBootFlagPath(bootToken);
-            CleanupFileQuietly(bootFlagPath);
-
-            Report(progress, "Updater", "Etapa 5/5: Iniciando a nova versão e aguardando confirmação...", 90);
-            var restartPsi = new ProcessStartInfo
+            string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            if (IsAdministrator() && !string.IsNullOrEmpty(progFiles) &&
+                targetDir.StartsWith(progFiles, StringComparison.OrdinalIgnoreCase))
             {
-                FileName = targetExe,
-                Arguments = $"--cleanup-updates --wait-pid={Environment.ProcessId} --boot-token={bootToken}",
-                WorkingDirectory = targetDir,
-                UseShellExecute = true
-            };
-
-            var started = Process.Start(restartPsi);
-            if (started == null)
-            {
-                LogUpdateError("Updater", "Process.Start retornou null ao reiniciar nova versao.");
-                bool rolledBack = RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
-                return new ApplyUpdateResult(false, 4, "A nova versão foi copiada, mas falhou ao iniciar.", rolledBack);
-            }
-
-            LogUpdate("Updater", $"Nova versao iniciada: Target='{targetExe}', NewPID={started.Id}, BootToken={bootToken}.");
-
-            if (!waitForBootConfirmation)
-            {
-                CleanupFileQuietly(backupExe);
-                Report(progress, "Done", "Atualização concluída com sucesso!", 100);
-                return new ApplyUpdateResult(true, 0, $"Atualização aplicada e processo PID={started.Id} iniciado.");
-            }
-
-            var waitSw = Stopwatch.StartNew();
-            while (waitSw.Elapsed.TotalSeconds < 25)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (File.Exists(bootFlagPath))
+                if (!WindowsUpdaterService.InstallOrUpdateService(targetExe, out var svcErr))
                 {
-                    string flagContent = "";
-                    try { flagContent = File.ReadAllText(bootFlagPath).Trim(); } catch { }
-                    CleanupFileQuietly(bootFlagPath);
-                    CleanupFileQuietly(backupExe);
-                    LogUpdate("Updater", $"Confirmacao de inicializacao recebida ({flagContent}). Atualizacao finalizada!");
-                    Report(progress, "Done", "Atualização instalada e inicialização confirmada!", 100);
-                    return new ApplyUpdateResult(true, 0, $"Nova versão instalada e confirmada ({flagContent}).");
+                    LogUpdate("Updater", $"Aviso ao registrar servico para futuras atualizacoes sem UAC: {svcErr}");
                 }
-
-                try
-                {
-                    started.Refresh();
-                    if (started.HasExited)
-                    {
-                        if (File.Exists(bootFlagPath))
-                        {
-                            CleanupFileQuietly(bootFlagPath);
-                            LogUpdate("Updater", "Nova versao confirmou boot antes de concluir execucao.");
-                            Report(progress, "Done", "Atualização instalada e inicialização confirmada!", 100);
-                            return new ApplyUpdateResult(true, 0, "Nova versão executada com confirmação de inicialização.");
-                        }
-
-                        int childExit = started.ExitCode;
-                        LogUpdateError("Updater", $"A nova versao iniciou (PID={started.Id}) e encerrou inesperadamente antes da confirmacao de boot (ExitCode={childExit}).");
-                        bool rolledBack = false;
-                        if (childExit != 0)
-                        {
-                            rolledBack = RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
-                        }
-                        return new ApplyUpdateResult(false, 5, $"A nova versão encerrou prematuramente (código {childExit}) antes de confirmar inicialização.", rolledBack);
-                    }
-                }
-                catch { }
-
-                int bootPct = Math.Min(98, 90 + (int)(waitSw.Elapsed.TotalSeconds * 0.35));
-                Report(progress, "Updater", $"Etapa 5/5: Aguardando abertura da nova versão ({(int)waitSw.Elapsed.TotalSeconds}s)...", bootPct);
-                Thread.Sleep(250);
             }
 
-            LogUpdate("Updater", $"Tempo limite (25s) aguardando confirmacao explicita, mas PID={started.Id} permanece ativo.");
-            Report(progress, "Done", $"Nova versão iniciada (PID={started.Id}). Aguardando carregamento completo do Windows.", 100);
-            return new ApplyUpdateResult(true, 0, $"Executável substituído e processo PID={started.Id} segue em execução.");
+            return LaunchTargetAndWaitBootConfirmation(
+                targetExe,
+                waitForBootConfirmation,
+                progress,
+                null,
+                () => RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup),
+                () => CleanupFileQuietly(backupExe),
+                cancellationToken);
         }
         catch (Exception ex)
         {
@@ -873,6 +968,95 @@ public class UpdateManager
             bool rolledBack = RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
             return new ApplyUpdateResult(false, 1, ex.Message, rolledBack);
         }
+    }
+
+    private static ApplyUpdateResult LaunchTargetAndWaitBootConfirmation(
+        string targetExe,
+        bool waitForBootConfirmation,
+        Action<UpdateProgressInfo>? progress,
+        Action<int>? onTargetStarted,
+        Func<bool> rollbackAction,
+        Action cleanupBackupAction,
+        CancellationToken cancellationToken)
+    {
+        string targetDir = Path.GetDirectoryName(targetExe) ?? "";
+        string bootToken = Guid.NewGuid().ToString("N");
+        string bootFlagPath = GetBootFlagPath(bootToken);
+        CleanupFileQuietly(bootFlagPath);
+
+        Report(progress, "Updater", "Reiniciando para a nova versão...", 90);
+        var restartPsi = new ProcessStartInfo
+        {
+            FileName = targetExe,
+            Arguments = $"--cleanup-updates --wait-pid={Environment.ProcessId} --boot-token={bootToken}",
+            WorkingDirectory = targetDir,
+            UseShellExecute = true
+        };
+
+        var started = Process.Start(restartPsi);
+        if (started == null)
+        {
+            LogUpdateError("Updater", "Process.Start retornou null ao reiniciar nova versao.");
+            bool rolledBack = rollbackAction();
+            return new ApplyUpdateResult(false, 4, "A nova versão foi instalada, mas falhou ao iniciar.", rolledBack);
+        }
+
+        try { onTargetStarted?.Invoke(started.Id); } catch { }
+        LogUpdate("Updater", $"Nova versao iniciada: Target='{targetExe}', NewPID={started.Id}, BootToken={bootToken}.");
+
+        if (!waitForBootConfirmation)
+        {
+            cleanupBackupAction();
+            Report(progress, "Done", "Atualização concluída com sucesso!", 100);
+            return new ApplyUpdateResult(true, 0, $"Atualização aplicada e processo PID={started.Id} iniciado.");
+        }
+
+        var waitSw = Stopwatch.StartNew();
+        while (waitSw.Elapsed.TotalSeconds < 25)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (File.Exists(bootFlagPath))
+            {
+                string flagContent = "";
+                try { flagContent = File.ReadAllText(bootFlagPath).Trim(); } catch { }
+                CleanupFileQuietly(bootFlagPath);
+                cleanupBackupAction();
+                LogUpdate("Updater", $"Confirmacao de inicializacao recebida ({flagContent}). Atualizacao finalizada!");
+                Report(progress, "Done", "Atualização concluída com sucesso!", 100);
+                return new ApplyUpdateResult(true, 0, $"Nova versão instalada e confirmada ({flagContent}).");
+            }
+
+            try
+            {
+                started.Refresh();
+                if (started.HasExited)
+                {
+                    if (File.Exists(bootFlagPath))
+                    {
+                        CleanupFileQuietly(bootFlagPath);
+                        cleanupBackupAction();
+                        LogUpdate("Updater", "Nova versao confirmou boot antes de concluir execucao.");
+                        Report(progress, "Done", "Atualização concluída com sucesso!", 100);
+                        return new ApplyUpdateResult(true, 0, "Nova versão executada com confirmação de inicialização.");
+                    }
+
+                    int childExit = started.ExitCode;
+                    LogUpdateError("Updater", $"A nova versao iniciou (PID={started.Id}) e encerrou inesperadamente antes da confirmacao de boot (ExitCode={childExit}).");
+                    bool rolledBack = childExit != 0 && rollbackAction();
+                    return new ApplyUpdateResult(false, 5, $"A nova versão encerrou prematuramente (código {childExit}) antes de confirmar inicialização.", rolledBack);
+                }
+            }
+            catch { }
+
+            int bootPct = Math.Min(98, 90 + (int)(waitSw.Elapsed.TotalSeconds * 0.35));
+            Report(progress, "Updater", "Iniciando a nova versão...", bootPct);
+            Thread.Sleep(250);
+        }
+
+        LogUpdate("Updater", $"Tempo limite (25s) aguardando confirmacao explicita, mas PID={started.Id} permanece ativo.");
+        Report(progress, "Done", "Nova versão iniciada com sucesso!", 100);
+        return new ApplyUpdateResult(true, 0, $"Executável substituído e processo PID={started.Id} segue em execução.");
     }
 
     public static void SignalBootSuccess(string[] args)
@@ -928,7 +1112,15 @@ public class UpdateManager
             string currentDir = Path.GetDirectoryName(currentExe) ?? "";
             if (!string.IsNullOrEmpty(currentDir))
             {
-                CleanupFileQuietly(Path.Combine(currentDir, "ApacKiosk.old.exe"));
+                string oldBackup = Path.Combine(currentDir, "ApacKiosk.old.exe");
+                if (File.Exists(oldBackup))
+                {
+                    CleanupFileQuietly(oldBackup);
+                    if (File.Exists(oldBackup) && WindowsUpdaterService.IsServiceRunning())
+                    {
+                        WindowsUpdaterService.CleanupBackupViaService(currentExe);
+                    }
+                }
             }
 
             if (isCleanup)
@@ -938,7 +1130,9 @@ public class UpdateManager
                 {
                     foreach (var f in Directory.GetFiles(tempDir))
                     {
-                        if (Path.GetFileName(f).StartsWith("boot_ok_", StringComparison.OrdinalIgnoreCase))
+                        string fname = Path.GetFileName(f);
+                        if (fname.StartsWith("boot_ok_", StringComparison.OrdinalIgnoreCase) ||
+                            fname.StartsWith("ui_ready_", StringComparison.OrdinalIgnoreCase))
                         {
                             try
                             {
@@ -952,7 +1146,7 @@ public class UpdateManager
                     }
                 }
                 var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
-                LogUpdate("Boot", $"Pos-atualizacao concluido! Versao em execucao=v{ver}, Exe='{currentExe}', Admin={IsAdministrator()}, PID={Environment.ProcessId}");
+                LogUpdate("Boot", $"Pos-atualizacao concluido! Versao em execucao=v{ver}, Exe='{currentExe}', Admin={IsAdministrator()}, ServiceActive={WindowsUpdaterService.IsServiceInstalled()}, PID={Environment.ProcessId}");
             }
         }
         catch { }
@@ -1016,6 +1210,66 @@ public class UpdateManager
         sb.AppendLine();
     }
 
+    internal static bool RestoreBackupFromService(string backupExe, string targetExe, ref bool movedToBackup) =>
+        RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
+
+    internal static void TerminateInstancesAtPathStatic(string targetExe) =>
+        TerminateOtherInstancesAtPath(targetExe);
+
+    private async Task<UpdateCheckResult?> TryCheckViaWebRedirectAsync(Version currentVersion, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var handler = new HttpClientHandler { AllowAutoRedirect = true };
+            using var webClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
+            webClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ApacKiosk", "1.0"));
+
+            var resp = await webClient.GetAsync($"https://github.com/{GitHubRepo}/releases/latest", HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            string finalUrl = resp.RequestMessage?.RequestUri?.ToString() ?? "";
+            int idx = finalUrl.LastIndexOf("/tag/", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return null;
+
+            string tagName = finalUrl.Substring(idx + 5).Trim('/', 'v', 'V');
+            if (!Version.TryParse(tagName, out var remoteVer))
+                return null;
+
+            if (remoteVer <= currentVersion)
+            {
+                return new UpdateCheckResult
+                {
+                    UpdateAvailable = false,
+                    CurrentVersion = currentVersion.ToString(),
+                    LatestVersion = remoteVer.ToString()
+                };
+            }
+
+            string downloadUrl = $"https://github.com/{GitHubRepo}/releases/download/v{remoteVer}/ApacKiosk.exe";
+            string shaUrl = $"https://github.com/{GitHubRepo}/releases/download/v{remoteVer}/ApacKiosk.exe.sha256";
+            string expectedSha = "";
+            try
+            {
+                var shaText = await webClient.GetStringAsync(shaUrl, cancellationToken);
+                expectedSha = shaText.Split(new[] { ' ', '\r', '\n', '\t' }, StringSplitOptions.RemoveEmptyEntries)[0].Trim();
+            }
+            catch { }
+
+            LogUpdate("Check", $"Fallback web resolveu v{remoteVer} | SHA256='{expectedSha}'");
+            return new UpdateCheckResult
+            {
+                UpdateAvailable = true,
+                CurrentVersion = currentVersion.ToString(),
+                LatestVersion = remoteVer.ToString(),
+                DownloadUrl = downloadUrl,
+                Sha256 = expectedSha
+            };
+        }
+        catch (Exception ex)
+        {
+            LogUpdate("Check", $"Fallback web falhou: {ex.Message}");
+            return null;
+        }
+    }
+
     private static bool RestoreBackupIfNeeded(string backupExe, string targetExe, ref bool movedToBackup)
     {
         if (string.IsNullOrEmpty(backupExe) || !File.Exists(backupExe))
@@ -1049,6 +1303,11 @@ public class UpdateManager
     private static string GetBootFlagPath(string bootToken)
     {
         return Path.Combine(Path.GetTempPath(), "ApacUpdates", $"boot_ok_{bootToken}.flag");
+    }
+
+    private static string GetUiReadyFlagPath(string readyToken)
+    {
+        return Path.Combine(Path.GetTempPath(), "ApacUpdates", $"ui_ready_{readyToken}.flag");
     }
 
     private static void TerminateBlockingProcess(int pid)

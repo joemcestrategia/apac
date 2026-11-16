@@ -32,6 +32,34 @@ static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        if (args.Any(a => a.Equals("--update-service", StringComparison.OrdinalIgnoreCase)))
+        {
+            Services.WindowsUpdaterService.RunServiceEntryPoint();
+            return;
+        }
+
+        if (args.Any(a => a.Equals("--install-update-service", StringComparison.OrdinalIgnoreCase)))
+        {
+            string targetExe = args.SkipWhile(a => !a.Equals("--install-update-service", StringComparison.OrdinalIgnoreCase))
+                .Skip(1)
+                .FirstOrDefault(a => !a.StartsWith("--"))?.Trim('"')
+                ?? (Process.GetCurrentProcess().MainModule?.FileName ?? Application.ExecutablePath);
+            Services.WindowsUpdaterService.InstallOrUpdateService(targetExe, out _);
+            return;
+        }
+
+        if (args.Any(a => a.Equals("--uninstall-update-service", StringComparison.OrdinalIgnoreCase)))
+        {
+            Services.WindowsUpdaterService.UninstallService();
+            return;
+        }
+
+        if (args.Any(a => a.Equals("--service-update-ui", StringComparison.OrdinalIgnoreCase)))
+        {
+            Services.UpdateManager.ExecuteServiceUpdateUiMode(args);
+            return;
+        }
+
         if (args.Any(a => a.Equals("--apply-update", StringComparison.OrdinalIgnoreCase)))
         {
             Services.UpdateManager.ExecuteApplyUpdateMode(args);
@@ -73,7 +101,11 @@ static class Program
         }
 
         Services.UpdateManager.SignalBootSuccess(args);
-        System.Threading.Tasks.Task.Run(() => Services.UpdateManager.HandlePostUpdateCleanup(args));
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            Services.UpdateManager.HandlePostUpdateCleanup(args);
+            EnsureBackgroundUpdateServiceIfElevated();
+        });
 
         Environment.SetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--no-sandbox");
         ApplicationConfiguration.Initialize();
@@ -382,6 +414,19 @@ static class Program
         ReleaseSingleInstanceMutex();
     }
 
+    public static void PrepareForServiceUiTransition()
+    {
+        try
+        {
+            FileDialogBlocker?.SetRestrictionActive(false);
+            FolderEnvironment?.RestoreOriginalEnvironment();
+            Security?.ShutdownPreservingLock();
+        }
+        catch { }
+
+        ReleaseSingleInstanceMutex();
+    }
+
     public static void RestoreAfterFailedUpdateExit(bool restoredFromElevation)
     {
         try
@@ -497,6 +542,28 @@ static class Program
             else
             {
                 try { key.DeleteValue("ApacKioskGuardian", false); } catch { }
+            }
+        }
+        catch { }
+    }
+
+    private static void EnsureBackgroundUpdateServiceIfElevated()
+    {
+        try
+        {
+            if (!Services.UpdateManager.IsAdministrator())
+                return;
+
+            string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? Application.ExecutablePath;
+            string currentDir = Path.GetDirectoryName(currentExe) ?? "";
+            string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+
+            if (string.IsNullOrEmpty(progFiles) || !currentDir.StartsWith(progFiles, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (!Services.WindowsUpdaterService.IsServiceRunning())
+            {
+                Services.WindowsUpdaterService.InstallOrUpdateService(currentExe, out _);
             }
         }
         catch { }

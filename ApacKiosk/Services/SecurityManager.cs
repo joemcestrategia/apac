@@ -72,6 +72,12 @@ namespace ApacKiosk.Services
             StopHook();
         }
 
+        public void ShutdownPreservingLock()
+        {
+            _isRunning = false;
+            StopHook();
+        }
+
         private void EnableHotkeyBlock()
         {
             if (_isHookRunning) return;

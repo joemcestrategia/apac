@@ -102,6 +102,7 @@ public static class UninstallHelper
     public static void ExecuteFullUninstall(bool purgeData)
     {
         int myPid = Process.GetCurrentProcess().Id;
+        Services.WindowsUpdaterService.UninstallService();
         var procs = Process.GetProcessesByName("ApacKiosk");
         foreach (var p in procs)
         {

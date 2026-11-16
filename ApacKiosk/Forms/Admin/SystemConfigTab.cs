@@ -35,7 +35,6 @@ namespace ApacKiosk.Forms.Admin
         private Button _btnEmergencyDisable;
 
         private Button _btnCheckUpdate;
-        private Button _btnUpdateLogs;
 
         private Button _btnSave;
 
@@ -216,16 +215,6 @@ namespace ApacKiosk.Forms.Admin
             _btnCheckUpdate.FlatAppearance.BorderSize = 0;
             _btnCheckUpdate.Click += (s, e) => CheckAndUpdateSystem();
             Controls.Add(_btnCheckUpdate);
-
-            _btnUpdateLogs = new Button
-            {
-                Text = "📋 Status e Logs", Location = new Point(495, y + 5), Size = new Size(190, 38),
-                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), FlatStyle = FlatStyle.Flat,
-                BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand
-            };
-            _btnUpdateLogs.FlatAppearance.BorderSize = 0;
-            _btnUpdateLogs.Click += (s, e) => UpdateStatusDialog.ShowDiagnostics(FindForm());
-            Controls.Add(_btnUpdateLogs);
             y += 55;
 
             _btnSave = new Button
