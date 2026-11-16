@@ -35,6 +35,7 @@ namespace ApacKiosk.Forms.Admin
         private Button _btnEmergencyDisable;
 
         private Button _btnCheckUpdate;
+        private Button _btnUpdateLogs;
 
         private Button _btnSave;
 
@@ -215,6 +216,16 @@ namespace ApacKiosk.Forms.Admin
             _btnCheckUpdate.FlatAppearance.BorderSize = 0;
             _btnCheckUpdate.Click += (s, e) => CheckAndUpdateSystem();
             Controls.Add(_btnCheckUpdate);
+
+            _btnUpdateLogs = new Button
+            {
+                Text = "📋 Status e Logs", Location = new Point(495, y + 5), Size = new Size(190, 38),
+                Font = new Font("Segoe UI", 10.5f, FontStyle.Bold), FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(59, 130, 246), ForeColor = Color.White, Cursor = Cursors.Hand
+            };
+            _btnUpdateLogs.FlatAppearance.BorderSize = 0;
+            _btnUpdateLogs.Click += (s, e) => UpdateStatusDialog.ShowDiagnostics(FindForm());
+            Controls.Add(_btnUpdateLogs);
             y += 55;
 
             _btnSave = new Button
@@ -451,39 +462,16 @@ namespace ApacKiosk.Forms.Admin
             }
         }
 
-        private async void CheckAndUpdateSystem()
+        private void CheckAndUpdateSystem()
         {
             var form = FindForm();
-            _btnCheckUpdate.Enabled = false;
-            _btnCheckUpdate.Text = "Verificando...";
-
             try
             {
-                var updateManager = new UpdateManager();
-                var (success, message) = await updateManager.PerformManualUpdateAsync(form, progress =>
-                {
-                    if (form != null && !form.IsDisposed)
-                    {
-                        form.Invoke(() => _btnCheckUpdate.Text = progress);
-                    }
-                });
-
-                if (!success)
-                {
-                    KioskDialog.ShowMessage(message, _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, (Control?)form ?? this);
-                }
+                UpdateStatusDialog.RunLiveUpdate(form);
             }
             catch (Exception ex)
             {
                 KioskDialog.ShowMessage($"Erro ao atualizar sistema:\n{ex.Message}", _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Error, (Control?)form ?? this);
-            }
-            finally
-            {
-                if (!_btnCheckUpdate.IsDisposed)
-                {
-                    _btnCheckUpdate.Enabled = true;
-                    _btnCheckUpdate.Text = "Verificar e Atualizar Sistema";
-                }
             }
         }
     }

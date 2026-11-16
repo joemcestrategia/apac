@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
@@ -7,6 +8,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Security.Principal;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -15,17 +17,33 @@ using ApacKiosk.Forms;
 
 namespace ApacKiosk.Services;
 
+public sealed class UpdateProgressInfo
+{
+    public string Stage { get; init; } = "Info";
+    public string Title { get; init; } = "";
+    public int Percent { get; init; }
+    public long BytesReceived { get; init; }
+    public long TotalBytes { get; init; }
+    public double BytesPerSecond { get; init; }
+}
+
 public class UpdateManager
 {
     private const string GitHubRepo = "joemcestrategia/apac";
+    private static readonly TimeSpan DownloadStallTimeout = TimeSpan.FromSeconds(20);
     private readonly HttpClient _client;
 
+    public static event Action<string>? OnUpdateLog;
+
     public string? LastFailureMessage { get; private set; }
+    public string? LastFailureStage { get; private set; }
+    public string? LastCheckError { get; private set; }
     public bool HadUpdateAttempt { get; private set; }
+    public UpdateCheckResult? LastCheckResult { get; private set; }
 
     public UpdateManager()
     {
-        _client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+        _client = new HttpClient { Timeout = TimeSpan.FromMinutes(10) };
         _client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("ApacKiosk", "1.0"));
     }
 
@@ -33,11 +51,11 @@ public class UpdateManager
     {
         try
         {
-            LastFailureMessage = null;
-            HadUpdateAttempt = false;
+            ResetRunState();
             LogUpdate("CloudSync", "Iniciando verificacao periodica de atualizacao em segundo plano.");
 
-            var updateInfo = await CheckForUpdatesAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var updateInfo = await CheckForUpdatesAsync(cts.Token);
             if (updateInfo == null || !updateInfo.UpdateAvailable)
                 return;
 
@@ -53,6 +71,7 @@ public class UpdateManager
             var (downloadOk, tempExeOrError) = await DownloadUpdateFileAsync(updateInfo, null);
             if (!downloadOk)
             {
+                LastFailureStage = "Download";
                 LastFailureMessage = tempExeOrError;
                 LogUpdateError("CloudSync", $"Falha no download v{updateInfo.LatestVersion}: {tempExeOrError}");
                 return;
@@ -60,30 +79,47 @@ public class UpdateManager
 
             if (!ApplyAtomicUpdate(tempExeOrError, out var applyErr))
             {
+                LastFailureStage = "Apply";
                 LastFailureMessage = applyErr;
                 LogUpdateError("CloudSync", $"Falha ao aplicar atualizacao v{updateInfo.LatestVersion}: {applyErr}");
             }
         }
         catch (Exception ex)
         {
+            LastFailureStage = "CloudSync";
             LastFailureMessage = ex.Message;
             LogUpdateError("CloudSync", $"Erro no CheckAndApplyUpdateAsync: {ex}");
         }
     }
 
-    public async Task<bool> CheckAndApplyStartupUpdateAsync(Action<string>? statusCallback = null, Action<int>? progressCallback = null)
+    public Task<bool> CheckAndApplyStartupUpdateAsync(Action<string>? statusCallback = null, Action<int>? progressCallback = null)
+    {
+        return CheckAndApplyStartupUpdateAsync(
+            info =>
+            {
+                statusCallback?.Invoke(info.Title);
+                if (info.Percent >= 0) progressCallback?.Invoke(info.Percent);
+            },
+            null);
+    }
+
+    public async Task<bool> CheckAndApplyStartupUpdateAsync(
+        Action<UpdateProgressInfo>? progressCallback,
+        Action<bool>? beforeElevationPrompt = null)
     {
         try
         {
-            LastFailureMessage = null;
-            HadUpdateAttempt = false;
-            LogUpdate("Startup", $"Iniciando checagem de atualizacao no boot. Versao atual=v{GetCurrentVersion()}, PID={Environment.ProcessId}, Admin={IsAdministrator()}, Exe='{Process.GetCurrentProcess().MainModule?.FileName}'");
+            ResetRunState();
+            string exePath = Process.GetCurrentProcess().MainModule?.FileName ?? Application.ExecutablePath;
+            LogUpdate("Startup", $"Iniciando checagem de atualizacao no boot. Versao atual=v{GetCurrentVersion()}, PID={Environment.ProcessId}, Admin={IsAdministrator()}, Exe='{exePath}'");
 
+            Report(progressCallback, "Check", "Consultando atualizações disponíveis...", 5);
             using var checkCts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
             var updateInfo = await CheckForUpdatesAsync(checkCts.Token);
             if (updateInfo == null)
             {
-                LogUpdate("Startup", "CheckForUpdatesAsync retornou null (sem conexao, timeout ou resposta invalida).");
+                string err = LastCheckError ?? "Sem resposta do servidor de atualizações.";
+                LogUpdate("Startup", $"CheckForUpdatesAsync nao retornou versao: {err}");
                 return false;
             }
 
@@ -94,24 +130,28 @@ public class UpdateManager
             }
 
             HadUpdateAttempt = true;
-            LogUpdate("Startup", $"Nova versao detectada: v{updateInfo.LatestVersion}. Iniciando download de '{updateInfo.DownloadUrl}'.");
-            statusCallback?.Invoke($"Nova versão v{updateInfo.LatestVersion} encontrada. Baixando atualização...");
+            LogUpdate("Startup", $"Nova versao detectada: v{updateInfo.LatestVersion}. Preparando download...");
+            Report(progressCallback, "Download", $"Nova versão v{updateInfo.LatestVersion} encontrada. Iniciando download...", 0);
 
             var (downloadOk, tempExeOrError) = await DownloadUpdateFileAsync(updateInfo, progressCallback);
             if (!downloadOk)
             {
+                LastFailureStage = "Download";
                 LastFailureMessage = tempExeOrError;
                 LogUpdateError("Startup", $"Falha no download da atualizacao de inicializacao: {tempExeOrError}");
+                Report(progressCallback, "Error", $"Falha no download: {tempExeOrError}", -1);
                 return false;
             }
 
-            statusCallback?.Invoke("Aplicando atualização e reiniciando...");
+            Report(progressCallback, "Apply", "Aplicando atualização e reiniciando...", 100);
             LogUpdate("Startup", $"Download concluido e validado em '{tempExeOrError}'. Chamando ApplyAtomicUpdate...");
 
-            if (!ApplyAtomicUpdate(tempExeOrError, out var applyError))
+            if (!ApplyAtomicUpdate(tempExeOrError, out var applyError, beforeElevationPrompt))
             {
-                LastFailureMessage = applyError ?? "Não foi possível substituir o executável.";
+                LastFailureStage = "Apply";
+                LastFailureMessage = applyError ?? "Não foi possível iniciar o instalador da atualização.";
                 LogUpdateError("Startup", $"ApplyAtomicUpdate falhou: {LastFailureMessage}");
+                Report(progressCallback, "Error", LastFailureMessage, -1);
                 return false;
             }
 
@@ -119,14 +159,17 @@ public class UpdateManager
         }
         catch (Exception ex)
         {
+            LastFailureStage = "Startup";
             LastFailureMessage = ex.Message;
             LogUpdateError("Startup", $"Erro na atualizacao de inicializacao: {ex}");
+            Report(progressCallback, "Error", ex.Message, -1);
             return false;
         }
     }
 
     public async Task<UpdateCheckResult?> CheckForUpdatesAsync(CancellationToken cancellationToken = default)
     {
+        LastCheckError = null;
         try
         {
             var currentVersion = GetCurrentVersion();
@@ -135,7 +178,11 @@ public class UpdateManager
 
             var response = await _client.GetAsync(apiUrl, cancellationToken);
             LogUpdate("Check", $"Resposta GitHub API: HTTP {(int)response.StatusCode} ({response.StatusCode})");
-            if (!response.IsSuccessStatusCode) return null;
+            if (!response.IsSuccessStatusCode)
+            {
+                LastCheckError = $"Servidor retornou HTTP {(int)response.StatusCode} ({response.StatusCode}).";
+                return null;
+            }
 
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
             using var doc = JsonDocument.Parse(body);
@@ -145,24 +192,28 @@ public class UpdateManager
             var versionString = tagName.TrimStart('v', 'V');
             if (string.IsNullOrWhiteSpace(versionString))
             {
+                LastCheckError = "A release no GitHub não informou tag de versão.";
                 LogUpdate("Check", "tag_name vazio na release do GitHub.");
                 return null;
             }
 
             if (!Version.TryParse(versionString, out var remoteVer))
             {
+                LastCheckError = $"Formato de versão inválido na release ('{tagName}').";
                 LogUpdate("Check", $"tag_name '{tagName}' nao pode ser interpretado como Version.");
                 return null;
             }
 
             if (remoteVer <= currentVersion)
             {
-                return new UpdateCheckResult
+                var sameResult = new UpdateCheckResult
                 {
                     UpdateAvailable = false,
                     CurrentVersion = currentVersion.ToString(),
                     LatestVersion = remoteVer.ToString()
                 };
+                LastCheckResult = sameResult;
+                return sameResult;
             }
 
             string downloadUrl = "";
@@ -178,7 +229,11 @@ public class UpdateManager
                     {
                         downloadUrl = asset.TryGetProperty("browser_download_url", out var urlProp) ? urlProp.GetString() ?? "" : "";
                     }
-                    else if (name.EndsWith(".sha256", StringComparison.OrdinalIgnoreCase) || name.Equals("sha256.txt", StringComparison.OrdinalIgnoreCase))
+                    else if (name.Equals("ApacKiosk.exe.sha256", StringComparison.OrdinalIgnoreCase) ||
+                             name.Equals("sha256.txt", StringComparison.OrdinalIgnoreCase) ||
+                             (string.IsNullOrEmpty(expectedSha256) &&
+                              name.EndsWith(".sha256", StringComparison.OrdinalIgnoreCase) &&
+                              !name.Contains("Instalador", StringComparison.OrdinalIgnoreCase)))
                     {
                         var shaUrl = asset.TryGetProperty("browser_download_url", out var shaUrlProp) ? shaUrlProp.GetString() ?? "" : "";
                         if (!string.IsNullOrEmpty(shaUrl))
@@ -199,12 +254,13 @@ public class UpdateManager
 
             if (string.IsNullOrEmpty(downloadUrl))
             {
+                LastCheckError = $"Release {tagName} encontrada, mas sem o executável ApacKiosk.exe anexado.";
                 LogUpdate("Check", $"Release {tagName} encontrada, mas asset ApacKiosk.exe ausente.");
                 return null;
             }
 
             LogUpdate("Check", $"Update disponivel: v{remoteVer} | SHA256='{expectedSha256}' | URL='{downloadUrl}'");
-            return new UpdateCheckResult
+            var result = new UpdateCheckResult
             {
                 UpdateAvailable = true,
                 CurrentVersion = currentVersion.ToString(),
@@ -213,26 +269,41 @@ public class UpdateManager
                 Sha256 = expectedSha256,
                 ReleaseNotes = releaseNotes
             };
+            LastCheckResult = result;
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            LastCheckError = "Tempo limite esgotado ao consultar o servidor de atualizações (12s). Verifique a internet.";
+            LogUpdateError("Check", LastCheckError);
+            return null;
+        }
+        catch (HttpRequestException ex)
+        {
+            LastCheckError = $"Falha de conexão ao verificar atualização: {ex.Message}";
+            LogUpdateError("Check", $"Erro HTTP ao verificar atualizacao no GitHub: {ex}");
+            return null;
         }
         catch (Exception ex)
         {
-            LogUpdateError("Check", $"Erro ao verificar atualizacao no GitHub: {ex.Message}");
+            LastCheckError = $"Erro ao verificar atualização: {ex.Message}";
+            LogUpdateError("Check", $"Erro ao verificar atualizacao no GitHub: {ex}");
             return null;
         }
     }
 
     public async Task<(bool success, string message)> PerformManualUpdateAsync(Control? owner = null, Action<string>? progressCallback = null)
     {
-        LastFailureMessage = null;
-        HadUpdateAttempt = false;
+        ResetRunState();
         LogUpdate("Manual", $"Verificacao manual iniciada. Versao atual=v{GetCurrentVersion()}, Admin={IsAdministrator()}");
 
         progressCallback?.Invoke("Verificando se há novas atualizações disponíveis...");
-        var updateInfo = await CheckForUpdatesAsync();
+        using var checkCts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var updateInfo = await CheckForUpdatesAsync(checkCts.Token);
 
         if (updateInfo == null)
         {
-            return (false, "Não foi possível verificar atualizações no momento. Verifique sua conexão com a internet.");
+            return (false, LastCheckError ?? "Não foi possível verificar atualizações no momento. Verifique sua conexão com a internet.");
         }
 
         if (!updateInfo.UpdateAvailable)
@@ -255,35 +326,49 @@ public class UpdateManager
             return (false, "Atualização cancelada pelo administrador.");
         }
 
+        return await DownloadAndApplyConfirmedUpdateAsync(
+            updateInfo,
+            info => progressCallback?.Invoke(info.Title),
+            null);
+    }
+
+    public async Task<(bool success, string message)> DownloadAndApplyConfirmedUpdateAsync(
+        UpdateCheckResult updateInfo,
+        Action<UpdateProgressInfo>? progressCallback = null,
+        Action<bool>? beforeElevationPrompt = null,
+        CancellationToken cancellationToken = default)
+    {
         HadUpdateAttempt = true;
-        progressCallback?.Invoke("Baixando atualização...");
-        var (downloadOk, tempExeOrError) = await DownloadUpdateFileAsync(updateInfo, pct =>
-        {
-            progressCallback?.Invoke($"Baixando atualização ({pct}%)...");
-        });
+        LastFailureStage = null;
+        LastFailureMessage = null;
+
+        Report(progressCallback, "Download", $"Iniciando download da versão v{updateInfo.LatestVersion}...", 0);
+        var (downloadOk, tempExeOrError) = await DownloadUpdateFileAsync(updateInfo, progressCallback, cancellationToken);
 
         if (!downloadOk)
         {
+            LastFailureStage = "Download";
             LastFailureMessage = tempExeOrError;
-            LogUpdateError("Manual", $"Falha ao baixar atualizacao manual: {tempExeOrError}");
+            LogUpdateError("Manual", $"Falha ao baixar atualizacao: {tempExeOrError}");
             return (false, $"Falha ao baixar atualização:\n{tempExeOrError}");
         }
 
-        progressCallback?.Invoke("Instalando atualização e reiniciando...");
-        bool applied = ApplyAtomicUpdate(tempExeOrError, out var applyErr);
+        Report(progressCallback, "Apply", "Iniciando instalador de atualização...", 100);
+        bool applied = ApplyAtomicUpdate(tempExeOrError, out var applyErr, beforeElevationPrompt);
         if (!applied)
         {
+            LastFailureStage = "Apply";
             LastFailureMessage = applyErr;
-            LogUpdateError("Manual", $"Falha ao aplicar atualizacao manual: {applyErr}");
+            LogUpdateError("Manual", $"Falha ao aplicar atualizacao: {applyErr}");
             return (false, $"Falha ao aplicar a atualização:\n{applyErr ?? "Erro desconhecido (consulte ApacKiosk_Update.log)."}");
         }
 
-        return (true, "Atualização aplicada com sucesso.");
+        return (true, "Atualização iniciada com sucesso.");
     }
 
     private async Task<(bool success, string result)> DownloadUpdateFileAsync(
         UpdateCheckResult updateInfo,
-        Action<int>? progressCallback,
+        Action<UpdateProgressInfo>? progressCallback,
         CancellationToken cancellationToken = default)
     {
         string tempDir = Path.Combine(Path.GetTempPath(), "ApacUpdates");
@@ -293,6 +378,24 @@ public class UpdateManager
         try
         {
             if (!Directory.Exists(tempDir)) Directory.CreateDirectory(tempDir);
+
+            if (!string.IsNullOrEmpty(updateInfo.Sha256) && File.Exists(tempExe))
+            {
+                try
+                {
+                    Report(progressCallback, "Verify", "Verificando pacote já baixado em cache...", 95);
+                    string cachedHash = ComputeSha256(tempExe);
+                    if (cachedHash.Equals(updateInfo.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        long cachedLen = new FileInfo(tempExe).Length;
+                        LogUpdate("Download", $"Pacote v{updateInfo.LatestVersion} ja validado em cache local ({cachedLen} bytes, SHA-256={cachedHash}). Pulando novo download.");
+                        Report(progressCallback, "Verify", $"Pacote v{updateInfo.LatestVersion} validado em cache ({FormatBytes(cachedLen)}).", 100, cachedLen, cachedLen, 0);
+                        return (true, tempExe);
+                    }
+                    LogUpdate("Download", $"Cache local '{tempExe}' com SHA-256 divergente ({cachedHash}). Baixando novamente.");
+                }
+                catch { }
+            }
 
             CleanupFileQuietly(partExe);
             CleanupFileQuietly(tempExe);
@@ -304,35 +407,80 @@ public class UpdateManager
             var totalBytes = response.Content.Headers.ContentLength ?? -1L;
             LogUpdate("Download", $"Tamanho informado pelo servidor: {totalBytes} bytes");
 
+            if (totalBytes > 0)
+            {
+                EnsureEnoughDiskSpace(tempDir, totalBytes + 30L * 1024 * 1024);
+            }
+
             await using var contentStream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            var speedTimer = Stopwatch.StartNew();
+            var uiTimer = Stopwatch.StartNew();
+
             await using (var fileStream = new FileStream(partExe, FileMode.Create, FileAccess.Write, FileShare.None, 81920, true))
             {
                 var buffer = new byte[81920];
                 long totalRead = 0;
                 int lastPct = -1;
                 int lastLoggedQuarter = -1;
-                int bytesRead;
 
-                while ((bytesRead = await contentStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) != 0)
+                while (true)
                 {
+                    int bytesRead;
+                    using var stallCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    stallCts.CancelAfter(DownloadStallTimeout);
+                    try
+                    {
+                        bytesRead = await contentStream.ReadAsync(buffer.AsMemory(0, buffer.Length), stallCts.Token);
+                    }
+                    catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        throw new TimeoutException($"Download estagnado: nenhum dado recebido por {(int)DownloadStallTimeout.TotalSeconds} segundos ({FormatBytes(totalRead)} baixados).");
+                    }
+
+                    if (bytesRead == 0)
+                        break;
+
                     await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
                     totalRead += bytesRead;
+
+                    double elapsedSec = Math.Max(0.2, speedTimer.Elapsed.TotalSeconds);
+                    double speed = totalRead / elapsedSec;
 
                     if (totalBytes > 0)
                     {
                         int pct = Math.Clamp((int)((totalRead * 100L) / totalBytes), 0, 100);
-                        if (pct != lastPct)
+                        if (pct != lastPct || uiTimer.ElapsedMilliseconds >= 400)
                         {
                             lastPct = pct;
-                            progressCallback?.Invoke(pct);
+                            uiTimer.Restart();
+                            Report(
+                                progressCallback,
+                                "Download",
+                                $"Baixando v{updateInfo.LatestVersion}: {pct}% ({FormatBytes(totalRead)} / {FormatBytes(totalBytes)} • {FormatBytes((long)speed)}/s)",
+                                pct,
+                                totalRead,
+                                totalBytes,
+                                speed);
                         }
 
                         int quarter = pct / 25;
                         if (quarter > lastLoggedQuarter)
                         {
                             lastLoggedQuarter = quarter;
-                            LogUpdate("Download", $"Progresso: {pct}% ({totalRead}/{totalBytes} bytes)");
+                            LogUpdate("Download", $"Progresso: {pct}% ({totalRead}/{totalBytes} bytes, {FormatBytes((long)speed)}/s)");
                         }
+                    }
+                    else if (uiTimer.ElapsedMilliseconds >= 400)
+                    {
+                        uiTimer.Restart();
+                        Report(
+                            progressCallback,
+                            "Download",
+                            $"Baixando v{updateInfo.LatestVersion}: {FormatBytes(totalRead)} ({FormatBytes((long)speed)}/s)",
+                            50,
+                            totalRead,
+                            -1,
+                            speed);
                     }
                 }
 
@@ -343,12 +491,13 @@ public class UpdateManager
                 {
                     fileStream.Close();
                     CleanupFileQuietly(partExe);
-                    return (false, $"Download incompleto ({totalRead} de {totalBytes} bytes).");
+                    return (false, $"Download incompleto ({FormatBytes(totalRead)} de {FormatBytes(totalBytes)}).");
                 }
             }
 
             if (!string.IsNullOrEmpty(updateInfo.Sha256))
             {
+                Report(progressCallback, "Verify", "Validando integridade do arquivo (SHA-256)...", 99);
                 string fileHash = ComputeSha256(partExe);
                 LogUpdate("Download", $"Validando SHA-256: esperado={updateInfo.Sha256}, calculado={fileHash}");
                 if (!fileHash.Equals(updateInfo.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -364,9 +513,15 @@ public class UpdateManager
             }
             File.Move(partExe, tempExe, overwrite: true);
             LogUpdate("Download", $"Arquivo final validado e pronto em '{tempExe}'.");
-            progressCallback?.Invoke(100);
+            Report(progressCallback, "Download", $"Download concluído ({FormatBytes(new FileInfo(tempExe).Length)}).", 100);
 
             return (true, tempExe);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            CleanupFileQuietly(partExe);
+            LogUpdate("Download", "Download cancelado.");
+            return (false, "Download cancelado.");
         }
         catch (Exception ex)
         {
@@ -376,9 +531,12 @@ public class UpdateManager
         }
     }
 
-    public static bool ApplyAtomicUpdate(string newExePath) => ApplyAtomicUpdate(newExePath, out _);
+    public static bool ApplyAtomicUpdate(string newExePath) => ApplyAtomicUpdate(newExePath, out _, null);
 
-    public static bool ApplyAtomicUpdate(string newExePath, out string? errorMessage)
+    public static bool ApplyAtomicUpdate(string newExePath, out string? errorMessage) =>
+        ApplyAtomicUpdate(newExePath, out errorMessage, null);
+
+    public static bool ApplyAtomicUpdate(string newExePath, out string? errorMessage, Action<bool>? beforeElevationPrompt)
     {
         errorMessage = null;
         try
@@ -406,6 +564,12 @@ public class UpdateManager
             LogUpdate("Apply", $"Preparando aplicacao da atualizacao. Alvo='{currentExe}', Novo='{newExePath}', PID={currentPid}, IsAdmin={isAdmin}, CanWriteDir={canWrite}");
 
             bool needsElevation = !canWrite;
+            if (needsElevation)
+            {
+                LogUpdate("Apply", "Pasta de instalacao protegida; solicitando elevacao (UAC) antes de iniciar updater.");
+                beforeElevationPrompt?.Invoke(true);
+            }
+
             Program.PrepareForUpdateExit(needsElevation);
 
             var psi = new ProcessStartInfo
@@ -429,6 +593,7 @@ public class UpdateManager
                 errorMessage = "Permissão de administrador negada ou cancelada no UAC.";
                 LogUpdateError("Apply", $"{errorMessage} (Win32 1223)");
                 Program.RestoreAfterFailedUpdateExit(needsElevation);
+                beforeElevationPrompt?.Invoke(false);
                 return false;
             }
             catch (Exception ex)
@@ -436,6 +601,7 @@ public class UpdateManager
                 errorMessage = ex.Message;
                 LogUpdateError("Apply", $"Falha ao iniciar updater externo: {ex}");
                 Program.RestoreAfterFailedUpdateExit(needsElevation);
+                beforeElevationPrompt?.Invoke(false);
                 return false;
             }
 
@@ -444,6 +610,7 @@ public class UpdateManager
                 errorMessage = "Não foi possível iniciar o instalador de atualização.";
                 LogUpdateError("Apply", errorMessage);
                 Program.RestoreAfterFailedUpdateExit(needsElevation);
+                beforeElevationPrompt?.Invoke(false);
                 return false;
             }
 
@@ -465,6 +632,8 @@ public class UpdateManager
         {
             string targetExe = "";
             int waitPid = 0;
+            bool noUi = args.Any(a => a.Equals("--no-ui", StringComparison.OrdinalIgnoreCase));
+            bool noBootWait = args.Any(a => a.Equals("--no-boot-wait", StringComparison.OrdinalIgnoreCase));
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -482,31 +651,94 @@ public class UpdateManager
                 }
             }
 
+            if (noUi)
+            {
+                var result = RunApplyUpdateCore(targetExe, waitPid, !noBootWait, null, CancellationToken.None);
+                return result.Success ? 0 : result.ErrorCode;
+            }
+
+            ApplicationConfiguration.Initialize();
+            Application.SetHighDpiMode(HighDpiMode.SystemAware);
+            using var statusForm = new UpdaterStatusForm(targetExe, waitPid, !noBootWait);
+            Application.Run(statusForm);
+            return statusForm.ExitCode;
+        }
+        catch (Exception ex)
+        {
+            LogUpdateError("Updater", $"Erro fatal em ExecuteApplyUpdateMode: {ex}");
+            return 1;
+        }
+    }
+
+    public sealed record ApplyUpdateResult(bool Success, int ErrorCode, string Summary, bool RolledBack = false);
+
+    public static ApplyUpdateResult RunApplyUpdateCore(
+        string targetExe,
+        int waitPid,
+        bool waitForBootConfirmation,
+        Action<UpdateProgressInfo>? progress,
+        CancellationToken cancellationToken)
+    {
+        string backupExe = "";
+        bool movedToBackup = false;
+
+        try
+        {
             string selfExe = Process.GetCurrentProcess().MainModule?.FileName ?? Application.ExecutablePath;
             LogUpdate("Updater", $"Modo --apply-update iniciado. Self='{selfExe}', Target='{targetExe}', WaitPID={waitPid}, IsAdmin={IsAdministrator()}, UpdaterPID={Environment.ProcessId}");
+            Report(progress, "Updater", "Preparando instalação da atualização...", 5);
 
             if (string.IsNullOrWhiteSpace(targetExe) || string.IsNullOrWhiteSpace(selfExe))
             {
-                LogUpdateError("Updater", "Parametro --apply-update sem caminho de destino valido.");
-                return 1;
+                string msg = "Parâmetro --apply-update sem caminho de destino válido.";
+                LogUpdateError("Updater", msg);
+                return new ApplyUpdateResult(false, 1, msg);
+            }
+
+            string targetDir = Path.GetDirectoryName(targetExe) ?? "";
+            if (string.IsNullOrEmpty(targetDir))
+            {
+                return new ApplyUpdateResult(false, 1, "Diretório de destino inválido.");
+            }
+
+            Directory.CreateDirectory(targetDir);
+            if (!CanWriteToDirectory(targetDir))
+            {
+                string msg = $"Sem permissão de escrita em '{targetDir}'. É necessário autorizar o acesso de Administrador.";
+                LogUpdateError("Updater", msg);
+                return new ApplyUpdateResult(false, 3, msg);
             }
 
             if (waitPid > 0 && waitPid != Environment.ProcessId)
             {
-                WaitForProcessExit(waitPid, 15000);
+                Report(progress, "Updater", $"Etapa 1/5: Aguardando encerramento da versão anterior (PID {waitPid})...", 15);
+                bool exited = WaitForProcessExit(waitPid, 7000);
+                if (!exited)
+                {
+                    LogUpdate("Updater", $"PID {waitPid} nao encerrou em 7s. Solicitando encerramento forçado para liberar arquivo...");
+                    TerminateBlockingProcess(waitPid);
+                }
             }
 
-            string targetDir = Path.GetDirectoryName(targetExe) ?? "";
-            string backupExe = Path.Combine(targetDir, "ApacKiosk.old.exe");
+            TerminateOtherInstancesAtPath(targetExe);
+
+            Report(progress, "Updater", "Etapa 2/5: Validando pacote de origem (SHA-256)...", 30);
+            backupExe = Path.Combine(targetDir, "ApacKiosk.old.exe");
             string selfSha = ComputeSha256Static(selfExe);
+            LogUpdate("Updater", $"SHA-256 de origem calculado: {selfSha}");
 
             Exception? lastEx = null;
             bool copied = false;
 
+            Report(progress, "Updater", "Etapa 3/5: Substituindo executável instalado...", 45);
             for (int attempt = 1; attempt <= 20; attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
+                    int pct = Math.Min(75, 45 + attempt);
+                    Report(progress, "Updater", $"Etapa 3/5: Instalando arquivo (tentativa {attempt}/20)...", pct);
+
                     if (File.Exists(backupExe))
                     {
                         try { File.Delete(backupExe); } catch { }
@@ -515,19 +747,19 @@ public class UpdateManager
                     if (File.Exists(targetExe))
                     {
                         File.Move(targetExe, backupExe, overwrite: true);
+                        movedToBackup = true;
                     }
 
                     File.Copy(selfExe, targetExe, overwrite: true);
+
+                    Report(progress, "Updater", "Etapa 4/5: Conferindo integridade SHA-256 no destino...", 80);
                     string targetSha = ComputeSha256Static(targetExe);
 
                     if (!string.Equals(selfSha, targetSha, StringComparison.OrdinalIgnoreCase))
                     {
                         LogUpdateError("Updater", $"Tentativa {attempt}: SHA-256 do destino divergiu (esperado={selfSha}, destino={targetSha}). Restaurando backup...");
-                        if (File.Exists(backupExe))
-                        {
-                            try { File.Copy(backupExe, targetExe, true); } catch { }
-                        }
-                        Thread.Sleep(300);
+                        RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
+                        Thread.Sleep(350);
                         continue;
                     }
 
@@ -539,38 +771,137 @@ public class UpdateManager
                 {
                     lastEx = ex;
                     LogUpdate("Updater", $"Tentativa {attempt}/20 de substituir '{targetExe}' falhou: {ex.GetType().Name} - {ex.Message}");
-                    Thread.Sleep(300);
+                    if (attempt == 5 || attempt == 12)
+                    {
+                        TerminateOtherInstancesAtPath(targetExe);
+                    }
+                    Thread.Sleep(350);
                 }
             }
 
             if (!copied)
             {
+                string errDetail = lastEx != null ? $"{lastEx.GetType().Name}: {lastEx.Message}" : "Arquivo bloqueado ou hash divergente.";
                 LogUpdateError("Updater", $"Falha definitiva ao substituir '{targetExe}': {lastEx}");
-                if (File.Exists(backupExe) && !File.Exists(targetExe))
-                {
-                    try { File.Move(backupExe, targetExe); } catch { }
-                }
-                return 2;
+                bool rolledBack = RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
+                return new ApplyUpdateResult(false, 2, $"Não foi possível substituir '{targetExe}': {errDetail}", rolledBack);
             }
 
-            CleanupFileQuietly(backupExe);
+            string bootToken = Guid.NewGuid().ToString("N");
+            string bootFlagPath = GetBootFlagPath(bootToken);
+            CleanupFileQuietly(bootFlagPath);
 
+            Report(progress, "Updater", "Etapa 5/5: Iniciando a nova versão e aguardando confirmação...", 90);
             var restartPsi = new ProcessStartInfo
             {
                 FileName = targetExe,
-                Arguments = $"--cleanup-updates --wait-pid={Environment.ProcessId}",
+                Arguments = $"--cleanup-updates --wait-pid={Environment.ProcessId} --boot-token={bootToken}",
                 WorkingDirectory = targetDir,
                 UseShellExecute = true
             };
 
             var started = Process.Start(restartPsi);
-            LogUpdate("Updater", $"Nova versao iniciada: Target='{targetExe}', NewPID={started?.Id ?? 0}. Encerrando updater.");
-            return 0;
+            if (started == null)
+            {
+                LogUpdateError("Updater", "Process.Start retornou null ao reiniciar nova versao.");
+                bool rolledBack = RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
+                return new ApplyUpdateResult(false, 4, "A nova versão foi copiada, mas falhou ao iniciar.", rolledBack);
+            }
+
+            LogUpdate("Updater", $"Nova versao iniciada: Target='{targetExe}', NewPID={started.Id}, BootToken={bootToken}.");
+
+            if (!waitForBootConfirmation)
+            {
+                CleanupFileQuietly(backupExe);
+                Report(progress, "Done", "Atualização concluída com sucesso!", 100);
+                return new ApplyUpdateResult(true, 0, $"Atualização aplicada e processo PID={started.Id} iniciado.");
+            }
+
+            var waitSw = Stopwatch.StartNew();
+            while (waitSw.Elapsed.TotalSeconds < 25)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (File.Exists(bootFlagPath))
+                {
+                    string flagContent = "";
+                    try { flagContent = File.ReadAllText(bootFlagPath).Trim(); } catch { }
+                    CleanupFileQuietly(bootFlagPath);
+                    CleanupFileQuietly(backupExe);
+                    LogUpdate("Updater", $"Confirmacao de inicializacao recebida ({flagContent}). Atualizacao finalizada!");
+                    Report(progress, "Done", "Atualização instalada e inicialização confirmada!", 100);
+                    return new ApplyUpdateResult(true, 0, $"Nova versão instalada e confirmada ({flagContent}).");
+                }
+
+                try
+                {
+                    started.Refresh();
+                    if (started.HasExited)
+                    {
+                        if (File.Exists(bootFlagPath))
+                        {
+                            CleanupFileQuietly(bootFlagPath);
+                            LogUpdate("Updater", "Nova versao confirmou boot antes de concluir execucao.");
+                            Report(progress, "Done", "Atualização instalada e inicialização confirmada!", 100);
+                            return new ApplyUpdateResult(true, 0, "Nova versão executada com confirmação de inicialização.");
+                        }
+
+                        int childExit = started.ExitCode;
+                        LogUpdateError("Updater", $"A nova versao iniciou (PID={started.Id}) e encerrou inesperadamente antes da confirmacao de boot (ExitCode={childExit}).");
+                        bool rolledBack = false;
+                        if (childExit != 0)
+                        {
+                            rolledBack = RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
+                        }
+                        return new ApplyUpdateResult(false, 5, $"A nova versão encerrou prematuramente (código {childExit}) antes de confirmar inicialização.", rolledBack);
+                    }
+                }
+                catch { }
+
+                int bootPct = Math.Min(98, 90 + (int)(waitSw.Elapsed.TotalSeconds * 0.35));
+                Report(progress, "Updater", $"Etapa 5/5: Aguardando abertura da nova versão ({(int)waitSw.Elapsed.TotalSeconds}s)...", bootPct);
+                Thread.Sleep(250);
+            }
+
+            LogUpdate("Updater", $"Tempo limite (25s) aguardando confirmacao explicita, mas PID={started.Id} permanece ativo.");
+            Report(progress, "Done", $"Nova versão iniciada (PID={started.Id}). Aguardando carregamento completo do Windows.", 100);
+            return new ApplyUpdateResult(true, 0, $"Executável substituído e processo PID={started.Id} segue em execução.");
         }
         catch (Exception ex)
         {
-            LogUpdateError("Updater", $"Erro fatal em ExecuteApplyUpdateMode: {ex}");
-            return 1;
+            LogUpdateError("Updater", $"Erro em RunApplyUpdateCore: {ex}");
+            bool rolledBack = RestoreBackupIfNeeded(backupExe, targetExe, ref movedToBackup);
+            return new ApplyUpdateResult(false, 1, ex.Message, rolledBack);
+        }
+    }
+
+    public static void SignalBootSuccess(string[] args)
+    {
+        try
+        {
+            string? bootToken = null;
+            foreach (var arg in args)
+            {
+                if (arg.StartsWith("--boot-token=", StringComparison.OrdinalIgnoreCase))
+                {
+                    bootToken = arg.Substring("--boot-token=".Length).Trim('"');
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(bootToken))
+                return;
+
+            string flagPath = GetBootFlagPath(bootToken);
+            var dir = Path.GetDirectoryName(flagPath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                Directory.CreateDirectory(dir);
+
+            File.WriteAllText(flagPath, $"OK PID={Environment.ProcessId} Time={DateTime.Now:O}");
+            LogUpdate("Boot", $"Sinal de boot saudavel gravado para token={bootToken}, PID={Environment.ProcessId}");
+        }
+        catch (Exception ex)
+        {
+            LogUpdateError("Boot", $"Falha ao gravar sinal de boot: {ex.Message}");
         }
     }
 
@@ -588,7 +919,7 @@ public class UpdateManager
                     int.TryParse(arg.Substring("--wait-pid=".Length), out waitPid);
             }
 
-            if (waitPid > 0)
+            if (waitPid > 0 && waitPid != Environment.ProcessId)
             {
                 WaitForProcessExit(waitPid, 6000);
             }
@@ -607,6 +938,16 @@ public class UpdateManager
                 {
                     foreach (var f in Directory.GetFiles(tempDir))
                     {
+                        if (Path.GetFileName(f).StartsWith("boot_ok_", StringComparison.OrdinalIgnoreCase))
+                        {
+                            try
+                            {
+                                if ((DateTime.UtcNow - File.GetLastWriteTimeUtc(f)).TotalMinutes > 5)
+                                    CleanupFileQuietly(f);
+                            }
+                            catch { }
+                            continue;
+                        }
                         CleanupFileQuietly(f);
                     }
                 }
@@ -617,7 +958,145 @@ public class UpdateManager
         catch { }
     }
 
-    private static void WaitForProcessExit(int pid, int timeoutMs)
+    public static string GetDiagnosticsReport()
+    {
+        var sb = new StringBuilder();
+        string currentExe = Process.GetCurrentProcess().MainModule?.FileName ?? Application.ExecutablePath;
+        string currentDir = Path.GetDirectoryName(currentExe) ?? "";
+        var ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+
+        sb.AppendLine($"Versão em execução : v{ver}");
+        sb.AppendLine($"Executável atual   : {currentExe}");
+        sb.AppendLine($"Executando c/ Admin: {(IsAdministrator() ? "Sim" : "Não")}");
+        sb.AppendLine($"Pasta gravável     : {(CanWriteToDirectory(currentDir) ? "Sim" : "Não (requer elevação UAC)")}");
+        sb.AppendLine();
+
+        string progDataLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "ApacKiosk", "ApacKiosk_Update.log");
+        string tempLog = Path.Combine(Path.GetTempPath(), "ApacKiosk_Update.log");
+        string errLog = Path.Combine(Path.GetTempPath(), "ApacKiosk_UpdateError.log");
+
+        AppendLogSection(sb, "Log ProgramData (últimas 60 linhas)", progDataLog, 60);
+        AppendLogSection(sb, "Log Temp (últimas 60 linhas)", tempLog, 60);
+        AppendLogSection(sb, "Log de Erros (últimas 30 linhas)", errLog, 30);
+
+        return sb.ToString();
+    }
+
+    private static void AppendLogSection(StringBuilder sb, string title, string path, int maxLines)
+    {
+        sb.AppendLine($"=== {title}: {path} ===");
+        try
+        {
+            if (!File.Exists(path))
+            {
+                sb.AppendLine("(arquivo ainda não gerado)");
+                sb.AppendLine();
+                return;
+            }
+
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var sr = new StreamReader(fs, Encoding.UTF8);
+            var lines = new List<string>();
+            while (!sr.EndOfStream)
+            {
+                var line = sr.ReadLine();
+                if (line != null) lines.Add(line);
+            }
+
+            int start = Math.Max(0, lines.Count - maxLines);
+            for (int i = start; i < lines.Count; i++)
+            {
+                sb.AppendLine(lines[i]);
+            }
+        }
+        catch (Exception ex)
+        {
+            sb.AppendLine($"(erro ao ler log: {ex.Message})");
+        }
+        sb.AppendLine();
+    }
+
+    private static bool RestoreBackupIfNeeded(string backupExe, string targetExe, ref bool movedToBackup)
+    {
+        if (string.IsNullOrEmpty(backupExe) || !File.Exists(backupExe))
+            return false;
+
+        if (!File.Exists(targetExe) || movedToBackup)
+        {
+            for (int attempt = 1; attempt <= 10; attempt++)
+            {
+                try
+                {
+                    File.Copy(backupExe, targetExe, true);
+                    LogUpdate("Updater", $"Rollback concluido na tentativa {attempt}: '{backupExe}' restaurado para '{targetExe}'.");
+                    movedToBackup = false;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    if (attempt == 10)
+                    {
+                        LogUpdateError("Updater", $"Falha no rollback de backup apos {attempt} tentativas: {ex.Message}");
+                        return false;
+                    }
+                    Thread.Sleep(250);
+                }
+            }
+        }
+        return false;
+    }
+
+    private static string GetBootFlagPath(string bootToken)
+    {
+        return Path.Combine(Path.GetTempPath(), "ApacUpdates", $"boot_ok_{bootToken}.flag");
+    }
+
+    private static void TerminateBlockingProcess(int pid)
+    {
+        try
+        {
+            using var proc = Process.GetProcessById(pid);
+            if (!proc.HasExited)
+            {
+                proc.Kill();
+                proc.WaitForExit(3000);
+                LogUpdate("Updater", $"Processo bloqueador PID={pid} encerrado.");
+            }
+        }
+        catch (Exception ex)
+        {
+            LogUpdate("Updater", $"Aviso ao encerrar PID={pid}: {ex.Message}");
+        }
+    }
+
+    private static void TerminateOtherInstancesAtPath(string targetExe)
+    {
+        try
+        {
+            string normalizedTarget = Path.GetFullPath(targetExe);
+            string procName = Path.GetFileNameWithoutExtension(targetExe);
+            foreach (var proc in Process.GetProcessesByName(procName))
+            {
+                try
+                {
+                    if (proc.Id == Environment.ProcessId) continue;
+                    string? path = null;
+                    try { path = proc.MainModule?.FileName; } catch { }
+                    if (string.IsNullOrEmpty(path) || string.Equals(Path.GetFullPath(path), normalizedTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        LogUpdate("Updater", $"Encerrando instancia em execucao no destino: PID={proc.Id}");
+                        proc.Kill();
+                        proc.WaitForExit(3000);
+                    }
+                }
+                catch { }
+                finally { proc.Dispose(); }
+            }
+        }
+        catch { }
+    }
+
+    private static bool WaitForProcessExit(int pid, int timeoutMs)
     {
         try
         {
@@ -625,19 +1104,82 @@ public class UpdateManager
             if (!proc.HasExited)
             {
                 LogUpdate("Updater", $"Aguardando encerramento do processo PID={pid} (ate {timeoutMs}ms)...");
-                proc.WaitForExit(timeoutMs);
+                return proc.WaitForExit(timeoutMs);
             }
+            return true;
         }
         catch (ArgumentException)
         {
+            return true;
         }
         catch (Exception ex)
         {
             LogUpdate("Updater", $"Aviso ao aguardar PID={pid}: {ex.Message}");
+            return false;
         }
     }
 
-    private static bool CanWriteToDirectory(string dir)
+    private static void EnsureEnoughDiskSpace(string path, long requiredBytes)
+    {
+        try
+        {
+            string? root = Path.GetPathRoot(Path.GetFullPath(path));
+            if (string.IsNullOrEmpty(root)) return;
+            var drive = new DriveInfo(root);
+            if (drive.IsReady && drive.AvailableFreeSpace < requiredBytes)
+            {
+                throw new IOException($"Espaço em disco insuficiente em {root} (necessário {FormatBytes(requiredBytes)}, disponível {FormatBytes(drive.AvailableFreeSpace)}).");
+            }
+        }
+        catch (IOException)
+        {
+            throw;
+        }
+        catch { }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes < 0) return "?";
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:F1} KB";
+        return $"{bytes / (1024.0 * 1024.0):F1} MB";
+    }
+
+    private void ResetRunState()
+    {
+        LastFailureMessage = null;
+        LastFailureStage = null;
+        LastCheckError = null;
+        HadUpdateAttempt = false;
+        LastCheckResult = null;
+    }
+
+    private static void Report(
+        Action<UpdateProgressInfo>? callback,
+        string stage,
+        string title,
+        int percent,
+        long bytesReceived = 0,
+        long totalBytes = 0,
+        double bytesPerSecond = 0)
+    {
+        try
+        {
+            callback?.Invoke(new UpdateProgressInfo
+            {
+                Stage = stage,
+                Title = title,
+                Percent = percent,
+                BytesReceived = bytesReceived,
+                TotalBytes = totalBytes,
+                BytesPerSecond = bytesPerSecond
+            });
+        }
+        catch { }
+    }
+
+    public static bool CanWriteToDirectory(string dir)
     {
         if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir))
             return false;
@@ -655,7 +1197,7 @@ public class UpdateManager
         }
     }
 
-    private static bool IsAdministrator()
+    public static bool IsAdministrator()
     {
         try
         {
@@ -678,7 +1220,7 @@ public class UpdateManager
         catch { }
     }
 
-    private Version GetCurrentVersion()
+    public static Version GetCurrentVersion()
     {
         return System.Reflection.Assembly.GetExecutingAssembly().GetName().Version ?? new Version(1, 0, 0, 0);
     }
@@ -695,11 +1237,13 @@ public class UpdateManager
 
     public static void LogUpdate(string stage, string msg)
     {
-        string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{stage}] {msg}\n";
+        string formatted = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{stage}] {msg}";
+        string line = formatted + "\n";
         AppendLogSafe(Path.Combine(Path.GetTempPath(), "ApacKiosk_Update.log"), line);
         AppendLogSafe(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
             "ApacKiosk", "ApacKiosk_Update.log"), line);
+        try { OnUpdateLog?.Invoke(formatted); } catch { }
     }
 
     private static void LogUpdateError(string stage, string msg)

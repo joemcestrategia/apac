@@ -51,8 +51,6 @@ static class Program
             return;
         }
 
-        Services.UpdateManager.HandlePostUpdateCleanup(args);
-
         bool hasPostUpdateWait = args.Any(a => a.Equals("--cleanup-updates", StringComparison.OrdinalIgnoreCase) || a.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase));
         int maxMutexAttempts = hasPostUpdateWait ? 24 : 5;
         bool isNewInstance = false;
@@ -73,6 +71,9 @@ static class Program
             Trace("Já existe uma instância rodando. Encerrando silenciosamente.");
             return;
         }
+
+        Services.UpdateManager.SignalBootSuccess(args);
+        System.Threading.Tasks.Task.Run(() => Services.UpdateManager.HandlePostUpdateCleanup(args));
 
         Environment.SetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--no-sandbox");
         ApplicationConfiguration.Initialize();

@@ -1,10 +1,10 @@
 using System;
 using System.Diagnostics;
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
@@ -18,6 +18,8 @@ public class InstallerForm : Form
     private const string ProgramDataDir = @"C:\ProgramData\ApacKiosk";
 
     private readonly bool _isUpdate;
+    private readonly string _appVersion;
+    private bool _installationCompleted;
 
     private Label _lblTitle = null!;
     private Label _lblSubtitle = null!;
@@ -32,13 +34,22 @@ public class InstallerForm : Form
     public InstallerForm()
     {
         _isUpdate = File.Exists(TargetExe);
-
+        _appVersion = GetInstallerVersion();
         InitializeComponent();
+    }
+
+    private static string GetInstallerVersion()
+    {
+        var ver = Assembly.GetExecutingAssembly().GetName().Version;
+        if (ver == null) return "1.0.0.0";
+        return $"{ver.Major}.{ver.Minor}.{Math.Max(0, ver.Build)}.{Math.Max(0, ver.Revision)}";
     }
 
     private void InitializeComponent()
     {
-        Text = _isUpdate ? "APAC Kiosk Guardian — Atualização v1.0.5.0" : "APAC Kiosk Guardian — Instalação v1.0.5.0";
+        Text = _isUpdate
+            ? $"APAC Kiosk Guardian — Atualização v{_appVersion}"
+            : $"APAC Kiosk Guardian — Instalação v{_appVersion}";
         Size = new Size(580, 420);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -56,7 +67,6 @@ public class InstallerForm : Form
         }
         catch { }
 
-        // Top Header
         var headerPanel = new Panel
         {
             Dock = DockStyle.Top,
@@ -96,7 +106,7 @@ public class InstallerForm : Form
 
         _lblSubtitle = new Label
         {
-            Text = "Versão 1.0.5.0 (Atualização no boot, Painel de Controle e desinstalação protegida)",
+            Text = $"Versão {_appVersion} (Instalador Offline • Atualização no boot e logs completos)",
             Font = new Font("Segoe UI", 9.5f),
             ForeColor = Color.FromArgb(160, 160, 200),
             Location = new Point(97, 48),
@@ -107,12 +117,11 @@ public class InstallerForm : Form
 
         Controls.Add(headerPanel);
 
-        // Content Area
         _lblStatus = new Label
         {
             Text = _isUpdate
                 ? "Uma instalação anterior do Kiosk foi detectada no computador.\n\n" +
-                  "Clique em 'Atualizar Agora' para aplicar a versão 1.0.5.0.\n" +
+                  $"Clique em 'ATUALIZAR AGORA' para aplicar a versão {_appVersion}.\n" +
                   "🔒 Todos os usuários, senhas, configurações e logs serão mantidos intactos."
                 : "O APAC Kiosk Guardian será instalado em:\n" +
                   TargetDir + "\n\n" +
@@ -157,7 +166,6 @@ public class InstallerForm : Form
         };
         Controls.Add(_chkLaunch);
 
-        // Buttons
         _btnAction = new Button
         {
             Text = _isUpdate ? "ATUALIZAR AGORA" : "INSTALAR AGORA",
@@ -170,7 +178,15 @@ public class InstallerForm : Form
             Cursor = Cursors.Hand
         };
         _btnAction.FlatAppearance.BorderSize = 0;
-        _btnAction.Click += async (s, e) => await StartInstallationAsync();
+        _btnAction.Click += async (_, _) =>
+        {
+            if (_installationCompleted)
+            {
+                FinishAndExit();
+                return;
+            }
+            await StartInstallationAsync();
+        };
         Controls.Add(_btnAction);
 
         _btnCancel = new Button
@@ -195,6 +211,7 @@ public class InstallerForm : Form
         _btnCancel.Enabled = false;
         _progressBar.Visible = true;
         _progressBar.Value = 5;
+        _lblDetails.ForeColor = Color.FromArgb(140, 140, 180);
 
         try
         {
@@ -207,15 +224,16 @@ public class InstallerForm : Form
                 });
             }));
 
+            _installationCompleted = true;
             _lblTitle.Text = _isUpdate ? "Atualização Concluída!" : "Instalação Concluída!";
             _lblTitle.ForeColor = Color.FromArgb(16, 185, 129);
             _lblStatus.Text = _isUpdate
-                ? "O APAC Kiosk Guardian foi atualizado com sucesso para a versão 1.0.5.0!\n\n" +
-                  "✔ Atualizações automáticas silenciosas na inicialização do sistema.\n" +
+                ? $"O APAC Kiosk Guardian foi atualizado com sucesso para a versão {_appVersion}!\n\n" +
+                  "✔ Atualizações automáticas no boot com janela de status e rollback.\n" +
                   "✔ Registro oficial no Painel de Controle (Adicionar ou Remover Programas).\n" +
                   "✔ Desinstalação protegida com senha de administrador.\n" +
                   "✔ Usuários, senhas e configurações preservados."
-                : "O APAC Kiosk Guardian foi instalado com sucesso no seu computador!\n\n" +
+                : $"O APAC Kiosk Guardian v{_appVersion} foi instalado com sucesso no seu computador!\n\n" +
                   "✔ Executável e recursos instalados em Arquivos de Programas.\n" +
                   "✔ Registro oficial no Painel de Controle do Windows.\n" +
                   "✔ Desinstalação protegida por senha de administrador.\n" +
@@ -228,9 +246,6 @@ public class InstallerForm : Form
             _btnAction.Text = "CONCLUIR";
             _btnAction.BackColor = Color.FromArgb(124, 58, 237);
             _btnAction.Enabled = true;
-            _btnAction.Click -= async (s, e) => await StartInstallationAsync();
-            _btnAction.Click += (s, e) => FinishAndExit();
-
             _btnCancel.Visible = false;
         }
         catch (Exception ex)
@@ -246,17 +261,14 @@ public class InstallerForm : Form
 
     private void PerformInstall(Action<(int Percent, string Message)> report)
     {
-        // 1. Fechar processos em execução
         report((10, "Verificando processos do Kiosk em execução..."));
         KillExistingProcesses();
-        System.Threading.Thread.Sleep(1000);
+        Thread.Sleep(800);
 
-        // 2. Garantir diretórios
         report((25, "Criando diretórios de instalação..."));
         Directory.CreateDirectory(TargetDir);
         Directory.CreateDirectory(ProgramDataDir);
 
-        // 3. Backup de segurança se for atualização
         if (_isUpdate && File.Exists(TargetExe))
         {
             report((35, "Criando backup de segurança da versão anterior (ApacKiosk.old.exe)..."));
@@ -268,8 +280,7 @@ public class InstallerForm : Form
             catch { }
         }
 
-        // 4. Extrair Payload.zip
-        report((50, "Instalando executável v1.0.5.0 e recursos..."));
+        report((50, $"Instalando executável v{_appVersion} e recursos..."));
         using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("ApacKiosk.Installer.Payload.zip"))
         {
             if (stream == null)
@@ -278,46 +289,90 @@ public class InstallerForm : Form
             }
 
             using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+            int total = Math.Max(1, archive.Entries.Count);
+            int idx = 0;
+
             foreach (var entry in archive.Entries)
             {
-                var fullDestPath = Path.Combine(TargetDir, entry.FullName);
+                idx++;
+                string relative = entry.FullName.Replace('/', Path.DirectorySeparatorChar);
+                var fullDestPath = Path.Combine(TargetDir, relative);
                 if (string.IsNullOrEmpty(entry.Name))
                 {
-                    // Diretório
                     Directory.CreateDirectory(fullDestPath);
                     continue;
                 }
 
                 Directory.CreateDirectory(Path.GetDirectoryName(fullDestPath)!);
-                entry.ExtractToFile(fullDestPath, true);
+                ExtractEntryWithRetry(entry, fullDestPath);
+                int pct = 50 + (idx * 25) / total;
+                report((pct, $"Instalando {entry.Name} ({idx}/{total})..."));
             }
         }
 
-        // 5. Criar atalhos (Desktop e Menu Iniciar)
-        report((75, "Criando atalhos na Área de Trabalho e Menu Iniciar..."));
+        CleanupQuietly(Path.Combine(TargetDir, "ApacKiosk.old.exe"));
+
+        report((80, "Criando atalhos na Área de Trabalho e Menu Iniciar..."));
         CreateShortcuts();
 
-        // 6. Registrar Autostart no Windows
-        report((85, "Configurando inicialização automática do Windows..."));
+        report((88, "Configurando inicialização automática do Windows..."));
         RegisterAutoStart();
 
-        // 7. Registrar no Painel de Controle (Adicionar ou Remover Programas)
         report((95, "Registrando no Painel de Controle do Windows..."));
         RegisterUninstallRegistry();
 
         report((100, "Finalizando instalação..."));
-        System.Threading.Thread.Sleep(500);
+        Thread.Sleep(400);
     }
 
-    private void KillExistingProcesses()
+    private static void ExtractEntryWithRetry(ZipArchiveEntry entry, string destPath)
+    {
+        for (int attempt = 1; attempt <= 10; attempt++)
+        {
+            try
+            {
+                entry.ExtractToFile(destPath, true);
+                return;
+            }
+            catch (Exception) when (attempt < 10)
+            {
+                KillExistingProcesses();
+                Thread.Sleep(350);
+            }
+        }
+    }
+
+    private static void KillExistingProcesses()
     {
         try
         {
-            var procs = Process.GetProcessesByName("ApacKiosk");
-            foreach (var p in procs)
+            int selfPid = Environment.ProcessId;
+            foreach (var p in Process.GetProcesses())
             {
-                try { p.Kill(); p.WaitForExit(3000); } catch { }
+                try
+                {
+                    if (p.Id == selfPid) continue;
+                    string name = p.ProcessName;
+                    if (name.Equals("ApacKiosk", StringComparison.OrdinalIgnoreCase) ||
+                        name.StartsWith("ApacKiosk_v", StringComparison.OrdinalIgnoreCase) ||
+                        name.Equals("ApacKioskUninstall", StringComparison.OrdinalIgnoreCase))
+                    {
+                        p.Kill();
+                        p.WaitForExit(3000);
+                    }
+                }
+                catch { }
+                finally { p.Dispose(); }
             }
+        }
+        catch { }
+    }
+
+    private static void CleanupQuietly(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
         }
         catch { }
     }
@@ -394,7 +449,7 @@ public class InstallerForm : Form
             if (key != null)
             {
                 key.SetValue("DisplayName", "APAC Kiosk Guardian");
-                key.SetValue("DisplayVersion", "1.0.5.0");
+                key.SetValue("DisplayVersion", _appVersion);
                 key.SetValue("Publisher", "APAC");
                 key.SetValue("InstallLocation", TargetDir);
                 key.SetValue("DisplayIcon", $"{TargetExe},0");

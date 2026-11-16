@@ -770,33 +770,34 @@ namespace ApacKiosk.Forms
 
         private DateTime _lastUpdateCheck = DateTime.MinValue;
 
-        private async void PromptAdminAndUpdate()
+        private void PromptAdminAndUpdate()
         {
-            // Proteção anti-spam: evita múltiplos cliques seguidos
-            if ((DateTime.Now - _lastUpdateCheck).TotalSeconds < 5)
+            if ((DateTime.Now - _lastUpdateCheck).TotalSeconds < 3)
             {
                 return;
             }
             _lastUpdateCheck = DateTime.Now;
 
             _btnSystemUpdate.Enabled = false;
-            _btnSystemUpdate.Text = "Verificando...";
 
             try
             {
-                var updateMgr = new UpdateManager();
-                var (success, msg) = await updateMgr.PerformManualUpdateAsync(this, progress =>
+                UpdateStatusDialog.RunLiveUpdate(this, activatingElevation =>
                 {
-                    if (!IsDisposed)
+                    if (IsDisposed) return;
+                    if (activatingElevation)
                     {
-                        Invoke(() => _btnSystemUpdate.Text = progress);
+                        TopMost = false;
+                    }
+                    else
+                    {
+                        TopMost = true;
+                        Program.Security?.SetMainWindow(Handle);
+                        Program.Security?.SetKioskLock(true);
+                        Program.Security?.ResumeWindowProtector();
+                        Program.Security?.ForceHideTaskbar();
                     }
                 });
-
-                if (!success)
-                {
-                    KioskDialog.ShowMessage(msg, _config.DisplayName, MessageBoxButtons.OK, MessageBoxIcon.Information, this);
-                }
             }
             catch (Exception ex)
             {
@@ -806,6 +807,7 @@ namespace ApacKiosk.Forms
             {
                 if (!IsDisposed && !_btnSystemUpdate.IsDisposed)
                 {
+                    TopMost = true;
                     _btnSystemUpdate.Enabled = true;
                     _btnSystemUpdate.Text = "🔄 Atualizar Sistema";
                     Program.Security?.SetMainWindow(Handle);
