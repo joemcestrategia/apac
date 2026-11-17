@@ -131,8 +131,34 @@ static class Program
 
         EnsureDataDirectory(dbPath);
 
-        Db = new Database.DatabaseManager(dbPath);
-        Db.Initialize();
+        try
+        {
+            Db = new Database.DatabaseManager(dbPath);
+            try
+            {
+                Db.Initialize();
+            }
+            catch (Microsoft.Data.Sqlite.SqliteException sqlex) when (sqlex.SqliteErrorCode == 8)
+            {
+                Trace("Banco em somente-leitura detectado. Solicitando reparo de permissoes...");
+                Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+                if (Services.UpdateManager.IsAdministrator())
+                {
+                    Services.WindowsUpdaterService.EnsureSharedDataDirectoryPermissions();
+                }
+                else
+                {
+                    Services.WindowsUpdaterService.TryFixDataDirectoryAclViaService();
+                }
+                Db.Initialize();
+            }
+        }
+        catch (Exception ex)
+        {
+            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "ApacKiosk_Crash.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] StartupDbError: {ex}\n"); } catch { }
+            MessageBox.Show($"Não foi possível inicializar o banco de dados do sistema:\n{ex.Message}", "APAC Kiosk Guardian", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
 
         Config = new Utils.ConfigManager(Db);
         FolderEnvironment = new Services.UserFolderEnvironmentService(Db);
@@ -411,6 +437,7 @@ static class Program
             catch { }
         }
 
+        try { Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools(); } catch { }
         ReleaseSingleInstanceMutex();
     }
 
@@ -421,6 +448,7 @@ static class Program
             FileDialogBlocker?.SetRestrictionActive(false);
             FolderEnvironment?.RestoreOriginalEnvironment();
             Security?.ShutdownPreservingLock();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
         }
         catch { }
 
@@ -523,6 +551,8 @@ static class Program
         var dir = Path.GetDirectoryName(dbPath);
         if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
             Directory.CreateDirectory(dir);
+        if (Services.UpdateManager.IsAdministrator())
+            Services.WindowsUpdaterService.EnsureSharedDataDirectoryPermissions();
     }
 
     private static void SetupAutostart()

@@ -101,6 +101,7 @@ public static class WindowsUpdaterService
             string hostExePath = Path.Combine(targetDir, ServiceHostExeName);
             string binCommand = $"\"{hostExePath}\" {ServiceArg}";
 
+            EnsureSharedDataDirectoryPermissions();
             EnsureProtectedStagingDirectory();
 
             IntPtr scm = OpenSCManagerW(null, null, SC_MANAGER_ALL_ACCESS);
@@ -272,6 +273,19 @@ public static class WindowsUpdaterService
         }, 10000);
     }
 
+    public static bool TryFixDataDirectoryAclViaService()
+    {
+        try
+        {
+            var resp = SendPipeCommand(new PipeRequest { Action = "FIX_DATA_ACL" }, 5000);
+            return resp != null && resp.Ok;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public static PipeResponse? SendPipeCommand(PipeRequest req, int timeoutMs)
     {
         try
@@ -363,6 +377,7 @@ public static class WindowsUpdaterService
             };
             SetServiceStatus(_serviceStatusHandle, ref _serviceStatus);
 
+            EnsureSharedDataDirectoryPermissions();
             EnsureProtectedStagingDirectory();
 
             _stopEvent.Reset();
@@ -496,6 +511,13 @@ public static class WindowsUpdaterService
         if (action == "PING")
         {
             return new PipeResponse { Ok = true, Message = $"v{UpdateManager.GetCurrentVersion()}" };
+        }
+
+        if (action == "FIX_DATA_ACL")
+        {
+            EnsureSharedDataDirectoryPermissions();
+            EnsureProtectedStagingDirectory();
+            return new PipeResponse { Ok = true, Message = "Permissões de dados ajustadas." };
         }
 
         string selfExe = Process.GetCurrentProcess().MainModule?.FileName ?? Environment.ProcessPath ?? "";
@@ -744,6 +766,90 @@ public static class WindowsUpdaterService
                 }
                 catch { }
             });
+        }
+        catch { }
+    }
+
+    public static void EnsureSharedDataDirectoryPermissions()
+    {
+        string baseDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+            "ApacKiosk");
+        try
+        {
+            Directory.CreateDirectory(baseDir);
+
+            var authUsers = new SecurityIdentifier(WellKnownSidType.AuthenticatedUserSid, null);
+            var systemSid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+            var adminsSid = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+
+            var dirInfo = new DirectoryInfo(baseDir);
+            var dirSec = dirInfo.GetAccessControl();
+            dirSec.AddAccessRule(new FileSystemAccessRule(
+                authUsers,
+                FileSystemRights.Modify,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            dirSec.AddAccessRule(new FileSystemAccessRule(
+                adminsSid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            dirSec.AddAccessRule(new FileSystemAccessRule(
+                systemSid,
+                FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None,
+                AccessControlType.Allow));
+            dirInfo.SetAccessControl(dirSec);
+
+            foreach (string file in Directory.GetFiles(baseDir))
+            {
+                GrantModifyOnFile(file, authUsers);
+            }
+
+            foreach (string subDir in Directory.GetDirectories(baseDir))
+            {
+                if (Path.GetFileName(subDir).Equals("ServiceStaging", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    var subInfo = new DirectoryInfo(subDir);
+                    var subSec = subInfo.GetAccessControl();
+                    subSec.AddAccessRule(new FileSystemAccessRule(
+                        authUsers,
+                        FileSystemRights.Modify,
+                        InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                        PropagationFlags.None,
+                        AccessControlType.Allow));
+                    subInfo.SetAccessControl(subSec);
+
+                    foreach (string file in Directory.GetFiles(subDir, "*", SearchOption.AllDirectories))
+                    {
+                        GrantModifyOnFile(file, authUsers);
+                    }
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            UpdateManager.LogUpdate("Service", $"Aviso ao ajustar ACL de ProgramData: {ex.Message}");
+        }
+    }
+
+    private static void GrantModifyOnFile(string filePath, IdentityReference identity)
+    {
+        try
+        {
+            var fi = new FileInfo(filePath);
+            var fs = fi.GetAccessControl();
+            fs.SetAccessRuleProtection(isProtected: false, preserveInheritance: true);
+            fs.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.Modify, AccessControlType.Allow));
+            fi.SetAccessControl(fs);
         }
         catch { }
     }
