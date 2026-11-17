@@ -204,7 +204,7 @@ public class SplashScreen : Form
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (DialogResult != DialogResult.OK && e.CloseReason == CloseReason.UserClosing)
+        if (DialogResult != DialogResult.OK && e.CloseReason != CloseReason.ApplicationExitCall)
         {
             e.Cancel = true;
             return;

@@ -323,6 +323,7 @@ public class InstallerForm : Form
 
         report((95, "Registrando no Painel de Controle do Windows..."));
         RegisterUninstallRegistry();
+        ClearResidualKioskPolicies();
 
         report((100, "Finalizando instalação..."));
         Thread.Sleep(400);
@@ -446,20 +447,38 @@ public class InstallerForm : Form
 
     private void RegisterAutoStart()
     {
+        string[] allNames = { "APAC Kiosk Guardian", "ApacKioskGuardian", "APAC_Kiosk" };
+        bool wroteHklm = false;
         try
         {
             using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-            key?.SetValue("APAC Kiosk Guardian", $"\"{TargetExe}\"");
-        }
-        catch
-        {
-            try
+            if (key != null)
             {
-                using var cuKey = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-                cuKey?.SetValue("APAC Kiosk Guardian", $"\"{TargetExe}\"");
+                key.SetValue("APAC Kiosk Guardian", $"\"{TargetExe}\"");
+                key.DeleteValue("ApacKioskGuardian", false);
+                key.DeleteValue("APAC_Kiosk", false);
+                wroteHklm = true;
             }
-            catch { }
         }
+        catch { }
+
+        try
+        {
+            using var cuKey = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
+            if (cuKey != null)
+            {
+                foreach (var name in allNames)
+                {
+                    if (!wroteHklm && name == "APAC Kiosk Guardian") continue;
+                    try { cuKey.DeleteValue(name, false); } catch { }
+                }
+                if (!wroteHklm)
+                {
+                    cuKey.SetValue("APAC Kiosk Guardian", $"\"{TargetExe}\"");
+                }
+            }
+        }
+        catch { }
     }
 
     private void RegisterUninstallRegistry()
@@ -485,6 +504,33 @@ public class InstallerForm : Form
 
         try { WriteKey(Registry.LocalMachine); } catch { }
         try { WriteKey(Registry.CurrentUser); } catch { }
+    }
+
+    private static void ClearResidualKioskPolicies()
+    {
+        try
+        {
+            using var sysKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Policies\System", true);
+            sysKey?.DeleteValue("DisableTaskMgr", false);
+            sysKey?.DeleteValue("DisableLockWorkstation", false);
+            sysKey?.DeleteValue("DisableChangePassword", false);
+        }
+        catch { }
+
+        try
+        {
+            using var expKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", true);
+            expKey?.DeleteValue("NoClose", false);
+            expKey?.DeleteValue("NoLogoff", false);
+        }
+        catch { }
+
+        try
+        {
+            using var hklmSysKey = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", true);
+            hklmSysKey?.DeleteValue("HideFastUserSwitching", false);
+        }
+        catch { }
     }
 
     private void FinishAndExit()

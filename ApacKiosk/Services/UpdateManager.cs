@@ -30,6 +30,7 @@ public sealed class UpdateProgressInfo
 public class UpdateManager
 {
     private const string GitHubRepo = "joemcestrategia/apac";
+    public const string UpdateInProgressMutexName = "Global\\APACKioskGuardian_UpdateInProgress";
     private static readonly TimeSpan DownloadStallTimeout = TimeSpan.FromSeconds(20);
     private readonly HttpClient _client;
 
@@ -578,6 +579,9 @@ public class UpdateManager
 
             LogUpdate("Apply", $"Preparando aplicacao da atualizacao. Alvo='{currentExe}', Novo='{newExePath}', PID={currentPid}, IsAdmin={isAdmin}, CanWriteDir={canWrite}, UseServiceNoUac={useServiceWithoutUac}");
 
+            Program.ProcessWatcher?.RegisterAllowedProcessName(Path.GetFileName(newExePath));
+            Program.ProcessWatcher?.Pause();
+
             if (useServiceWithoutUac)
             {
                 string sha = string.IsNullOrWhiteSpace(expectedSha256) ? ComputeSha256Static(newExePath) : expectedSha256;
@@ -593,28 +597,79 @@ public class UpdateManager
                     UseShellExecute = true
                 };
 
-                var uiProc = Process.Start(svcUiPsi);
+                Process? uiProc;
+                try
+                {
+                    uiProc = Process.Start(svcUiPsi);
+                }
+                catch (Exception startEx)
+                {
+                    errorMessage = $"Não foi possível iniciar o processo de atualização: {startEx.Message}";
+                    LogUpdateError("Apply", $"{errorMessage} ({startEx})");
+                    Program.ProcessWatcher?.Resume();
+                    return false;
+                }
+
                 if (uiProc == null)
                 {
                     errorMessage = "Não foi possível iniciar a interface de atualização sem UAC.";
                     LogUpdateError("Apply", errorMessage);
+                    Program.ProcessWatcher?.Resume();
                     return false;
                 }
 
+                Program.ProcessWatcher?.RegisterAllowedProcess(uiProc.Id);
                 Program.Security?.RegisterAllowedProcess(uiProc.Id);
                 LogUpdate("Apply", $"Interface sem UAC iniciada (PID={uiProc.Id}). Aguardando bloqueio de tela...");
 
+                bool uiSignaledReady = false;
+                bool uiExitedEarly = false;
+                int? uiExitCode = null;
                 var waitReadySw = Stopwatch.StartNew();
-                while (waitReadySw.Elapsed.TotalSeconds < 6)
+                while (waitReadySw.Elapsed.TotalSeconds < 15)
                 {
                     if (File.Exists(readyFlag))
                     {
                         CleanupFileQuietly(readyFlag);
+                        uiSignaledReady = true;
                         break;
                     }
-                    if (uiProc.HasExited)
-                        break;
+                    try
+                    {
+                        uiProc.Refresh();
+                        if (uiProc.HasExited)
+                        {
+                            uiExitedEarly = true;
+                            try { uiExitCode = uiProc.ExitCode; } catch { }
+                            break;
+                        }
+                    }
+                    catch { break; }
                     Thread.Sleep(50);
+                }
+
+                if (!uiSignaledReady)
+                {
+                    if (!uiExitedEarly)
+                    {
+                        try
+                        {
+                            if (!uiProc.HasExited)
+                                uiProc.Kill();
+                        }
+                        catch { }
+                    }
+
+                    errorMessage = uiExitedEarly
+                        ? $"A tela de atualização fechou inesperadamente antes de assumir (código {uiExitCode?.ToString() ?? "?"})."
+                        : "Tempo limite aguardando a tela de atualização assumir o controle.";
+                    LogUpdateError("Apply", $"Transicao sem UAC abortada (PID={uiProc.Id}, ExitedEarly={uiExitedEarly}, ExitCode={uiExitCode}): {errorMessage}");
+                    Program.ProcessWatcher?.Resume();
+                    Program.Security?.SetKioskLock(true);
+                    Program.Security?.EnableAllSecurity();
+                    Program.Security?.ResumeWindowProtector();
+                    Program.Security?.ForceHideTaskbar();
+                    return false;
                 }
 
                 Program.PrepareForServiceUiTransition();
@@ -682,12 +737,34 @@ public class UpdateManager
         {
             errorMessage = ex.Message;
             LogUpdateError("Apply", $"ApplyAtomicUpdate error: {ex}");
+            Program.ProcessWatcher?.Resume();
             return false;
         }
     }
 
     public static int ExecuteServiceUpdateUiMode(string[] args)
     {
+        LogUpdate("UpdaterUI", $"Modo --service-update-ui iniciado. PID={Environment.ProcessId}, Admin={IsAdministrator()}, Args='{string.Join(" ", args)}'");
+        Mutex? updateMutex = null;
+        try
+        {
+            updateMutex = new Mutex(true, UpdateInProgressMutexName, out _);
+        }
+        catch { }
+
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            var msg = (e.ExceptionObject as Exception)?.ToString() ?? e.ExceptionObject?.ToString() ?? "Erro desconhecido";
+            LogUpdateError("UpdaterUI", $"UnhandledException em --service-update-ui: {msg}");
+            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "ApacKiosk_Crash.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] UpdaterUI UnhandledException: {msg}\n"); } catch { }
+        };
+
+        Application.ThreadException += (_, e) =>
+        {
+            LogUpdateError("UpdaterUI", $"ThreadException em --service-update-ui: {e.Exception}");
+            try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "ApacKiosk_Crash.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] UpdaterUI ThreadException: {e.Exception}\n"); } catch { }
+        };
+
         try
         {
             string targetExe = "";
@@ -712,6 +789,7 @@ public class UpdateManager
 
             ApplicationConfiguration.Initialize();
             Application.SetHighDpiMode(HighDpiMode.SystemAware);
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             using var form = new UpdaterStatusForm(targetExe, waitPid, true, useServiceMode: true, targetVersion, expectedSha, readyToken);
             Application.Run(form);
             return form.ExitCode;
@@ -719,7 +797,17 @@ public class UpdateManager
         catch (Exception ex)
         {
             LogUpdateError("UpdaterUI", $"Erro fatal em ExecuteServiceUpdateUiMode: {ex}");
+            SecurityManager.RestoreSystemShellAndPolicies(includeService: false);
             return 1;
+        }
+        finally
+        {
+            try
+            {
+                updateMutex?.ReleaseMutex();
+                updateMutex?.Dispose();
+            }
+            catch { }
         }
     }
 
@@ -732,8 +820,12 @@ public class UpdateManager
             var dir = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
             File.WriteAllText(path, $"UI_READY PID={Environment.ProcessId}");
+            LogUpdate("UpdaterUI", $"Sinal readyFlag gravado: token={readyToken}, PID={Environment.ProcessId}");
         }
-        catch { }
+        catch (Exception ex)
+        {
+            LogUpdateError("UpdaterUI", $"Falha ao gravar readyFlag: {ex.Message}");
+        }
     }
 
     public static ApplyUpdateResult RunServiceUpdateUiCore(
@@ -743,7 +835,8 @@ public class UpdateManager
         string expectedSha,
         Action<UpdateProgressInfo>? progress,
         Action<int>? onTargetStarted,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? onBeforeTargetStart = null)
     {
         try
         {
@@ -772,7 +865,8 @@ public class UpdateManager
                 onTargetStarted,
                 () => WindowsUpdaterService.RollbackViaService(targetExe)?.Ok == true,
                 () => WindowsUpdaterService.CleanupBackupViaService(targetExe),
-                cancellationToken);
+                cancellationToken,
+                onBeforeTargetStart);
         }
         catch (Exception ex)
         {
@@ -977,7 +1071,8 @@ public class UpdateManager
         Action<int>? onTargetStarted,
         Func<bool> rollbackAction,
         Action cleanupBackupAction,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action? onBeforeTargetStart = null)
     {
         string targetDir = Path.GetDirectoryName(targetExe) ?? "";
         string bootToken = Guid.NewGuid().ToString("N");
@@ -985,6 +1080,8 @@ public class UpdateManager
         CleanupFileQuietly(bootFlagPath);
 
         Report(progress, "Updater", "Reiniciando para a nova versão...", 90);
+        try { onBeforeTargetStart?.Invoke(); } catch { }
+
         var restartPsi = new ProcessStartInfo
         {
             FileName = targetExe,

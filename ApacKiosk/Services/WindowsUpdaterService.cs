@@ -12,6 +12,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32;
 
 namespace ApacKiosk.Services;
 
@@ -27,6 +28,7 @@ public static class WindowsUpdaterService
     private static IntPtr _serviceStatusHandle = IntPtr.Zero;
     private static SERVICE_STATUS _serviceStatus;
     private static readonly ManualResetEventSlim _stopEvent = new(false);
+    private static readonly object _applySyncLock = new();
     private static ServiceMainProc? _serviceMainDelegate;
     private static HandlerExProc? _handlerExDelegate;
 
@@ -286,11 +288,96 @@ public static class WindowsUpdaterService
         }
     }
 
+    public static bool SetCtrlAltDelLockViaService(bool enabled)
+    {
+        try
+        {
+            var resp = SendPipeCommand(new PipeRequest
+            {
+                Action = "SET_CTRL_ALT_DEL_LOCK",
+                Enabled = enabled
+            }, 2500);
+            return resp != null && resp.Ok;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public static void SetFastUserSwitchingPolicy(bool lockEnabled)
+    {
+        try
+        {
+            const string hklmSysPolicies = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System";
+            if (lockEnabled)
+            {
+                using var key = Registry.LocalMachine.CreateSubKey(hklmSysPolicies, true);
+                key?.SetValue("HideFastUserSwitching", 1, RegistryValueKind.DWord);
+            }
+            else
+            {
+                using var key = Registry.LocalMachine.OpenSubKey(hklmSysPolicies, true);
+                key?.DeleteValue("HideFastUserSwitching", throwOnMissingValue: false);
+            }
+        }
+        catch { }
+    }
+
+    public static void SetCtrlAltDelPoliciesForUser(string? userSid, bool lockEnabled)
+    {
+        SetFastUserSwitchingPolicy(lockEnabled);
+
+        if (string.IsNullOrWhiteSpace(userSid))
+            return;
+
+        try
+        {
+            _ = new SecurityIdentifier(userSid);
+        }
+        catch
+        {
+            return;
+        }
+
+        ApplyUserPolicyKey(Registry.Users, $@"{userSid}\Software\Microsoft\Windows\CurrentVersion\Policies\System",
+            lockEnabled, "DisableTaskMgr", "DisableLockWorkstation", "DisableChangePassword");
+        ApplyUserPolicyKey(Registry.Users, $@"{userSid}\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer",
+            lockEnabled, "NoClose", "NoLogoff");
+    }
+
+    private static void ApplyUserPolicyKey(RegistryKey root, string subKeyPath, bool lockEnabled, params string[] valueNames)
+    {
+        try
+        {
+            if (lockEnabled)
+            {
+                using var key = root.CreateSubKey(subKeyPath, true);
+                if (key == null) return;
+                foreach (var name in valueNames)
+                    key.SetValue(name, 1, RegistryValueKind.DWord);
+            }
+            else
+            {
+                using var key = root.OpenSubKey(subKeyPath, true);
+                if (key == null) return;
+                foreach (var name in valueNames)
+                    key.DeleteValue(name, throwOnMissingValue: false);
+            }
+        }
+        catch { }
+    }
+
     public static PipeResponse? SendPipeCommand(PipeRequest req, int timeoutMs)
     {
         try
         {
-            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.None);
+            using var client = new NamedPipeClientStream(
+                ".",
+                PipeName,
+                PipeDirection.InOut,
+                PipeOptions.None,
+                TokenImpersonationLevel.Impersonation);
             client.Connect(Math.Min(timeoutMs, 3000));
             client.ReadMode = PipeTransmissionMode.Byte;
 
@@ -454,7 +541,19 @@ public static class WindowsUpdaterService
                 }
                 waitTask.GetAwaiter().GetResult();
 
-                ProcessPipeClient(server);
+                var connectedPipe = server;
+                server = null;
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        ProcessPipeClient(connectedPipe);
+                    }
+                    finally
+                    {
+                        try { connectedPipe.Dispose(); } catch { }
+                    }
+                });
             }
             catch (Exception ex)
             {
@@ -466,7 +565,10 @@ public static class WindowsUpdaterService
             }
             finally
             {
-                try { server?.Dispose(); } catch { }
+                if (server != null)
+                {
+                    try { server.Dispose(); } catch { }
+                }
             }
         }
     }
@@ -484,10 +586,21 @@ public static class WindowsUpdaterService
             }
             else
             {
+                string clientSid = "";
+                try
+                {
+                    server.RunAsClient(() =>
+                    {
+                        using var identity = WindowsIdentity.GetCurrent();
+                        clientSid = identity.User?.Value ?? "";
+                    });
+                }
+                catch { }
+
                 var req = JsonSerializer.Deserialize<PipeRequest>(line);
                 response = req == null
                     ? new PipeResponse { Ok = false, Error = "Requisição inválida." }
-                    : ExecutePipeAction(req);
+                    : ExecutePipeAction(req, clientSid);
             }
         }
         catch (Exception ex)
@@ -505,7 +618,7 @@ public static class WindowsUpdaterService
         catch { }
     }
 
-    private static PipeResponse ExecutePipeAction(PipeRequest req)
+    private static PipeResponse ExecutePipeAction(PipeRequest req, string clientSid = "")
     {
         string action = (req.Action ?? "").Trim().ToUpperInvariant();
         if (action == "PING")
@@ -518,6 +631,12 @@ public static class WindowsUpdaterService
             EnsureSharedDataDirectoryPermissions();
             EnsureProtectedStagingDirectory();
             return new PipeResponse { Ok = true, Message = "Permissões de dados ajustadas." };
+        }
+
+        if (action == "SET_CTRL_ALT_DEL_LOCK")
+        {
+            SetCtrlAltDelPoliciesForUser(clientSid, req.Enabled ?? true);
+            return new PipeResponse { Ok = true, Message = "Política Ctrl+Alt+Del atualizada." };
         }
 
         string selfExe = Process.GetCurrentProcess().MainModule?.FileName ?? Environment.ProcessPath ?? "";
@@ -537,6 +656,7 @@ public static class WindowsUpdaterService
             {
                 string backupExe = Path.Combine(serviceDir, "ApacKiosk.old.exe");
                 if (File.Exists(backupExe)) File.Delete(backupExe);
+                ScheduleHostSelfRefreshIfNeeded(allowedTargetExe);
                 return new PipeResponse { Ok = true, Message = "Backup limpo." };
             }
             catch (Exception ex)
@@ -550,6 +670,10 @@ public static class WindowsUpdaterService
             string backupExe = Path.Combine(serviceDir, "ApacKiosk.old.exe");
             bool dummy = true;
             bool rolled = UpdateManager.RestoreBackupFromService(backupExe, allowedTargetExe, ref dummy);
+            if (rolled)
+            {
+                EnsureTargetBinaryReadableByUsers(allowedTargetExe);
+            }
             return new PipeResponse
             {
                 Ok = rolled,
@@ -559,7 +683,10 @@ public static class WindowsUpdaterService
 
         if (action == "APPLY")
         {
-            return ExecuteServiceApply(req, allowedTargetExe, serviceDir);
+            lock (_applySyncLock)
+            {
+                return ExecuteServiceApply(req, allowedTargetExe, serviceDir);
+            }
         }
 
         return new PipeResponse { Ok = false, Error = $"Ação desconhecida: {req.Action}" };
@@ -617,7 +744,7 @@ public static class WindowsUpdaterService
                     }
 
                     UpdateManager.LogUpdate("Service", $"Atualizacao aplicada sem UAC na tentativa {attempt}. SHA-256={targetSha}");
-                    ScheduleHostSelfRefreshIfNeeded(targetExe);
+                    EnsureTargetBinaryReadableByUsers(targetExe);
                     return new PipeResponse { Ok = true, Message = "Atualização aplicada com sucesso." };
                 }
                 catch (Exception ex)
@@ -854,6 +981,23 @@ public static class WindowsUpdaterService
         catch { }
     }
 
+    private static void EnsureTargetBinaryReadableByUsers(string targetExe)
+    {
+        try
+        {
+            if (!File.Exists(targetExe)) return;
+            var fi = new FileInfo(targetExe);
+            var fs = fi.GetAccessControl();
+            fs.SetAccessRuleProtection(isProtected: false, preserveInheritance: true);
+            fs.AddAccessRule(new FileSystemAccessRule(
+                new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null),
+                FileSystemRights.ReadAndExecute,
+                AccessControlType.Allow));
+            fi.SetAccessControl(fs);
+        }
+        catch { }
+    }
+
     private static string EnsureProtectedStagingDirectory()
     {
         string stagingDir = Path.Combine(
@@ -1059,6 +1203,7 @@ public static class WindowsUpdaterService
         public string TargetVersion { get; set; } = "";
         public string ExpectedSha256 { get; set; } = "";
         public int WaitPid { get; set; }
+        public bool? Enabled { get; set; }
     }
 
     public sealed class PipeResponse

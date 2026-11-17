@@ -35,6 +35,7 @@ public class UpdaterStatusForm : Form
 
     private SecurityManager? _localSecurity;
     private volatile bool _isBusy = true;
+    private volatile bool _handoverStarted;
 
     public int ExitCode { get; private set; } = 1;
 
@@ -187,6 +188,7 @@ public class UpdaterStatusForm : Form
         Shown += async (_, _) =>
         {
             ActivateKioskScreenLock();
+            UpdateManager.LogUpdate("UpdaterUI", $"UpdaterStatusForm exibido (ServiceMode={_useServiceMode}, Target='{_targetExe}', ReadyTokenPresent={!string.IsNullOrWhiteSpace(_readyToken)}).");
             if (!string.IsNullOrWhiteSpace(_readyToken))
             {
                 UpdateManager.SignalUiReady(_readyToken);
@@ -198,7 +200,10 @@ public class UpdaterStatusForm : Form
         {
             try
             {
-                _localSecurity?.ShutdownPreservingLock();
+                if (_handoverStarted)
+                    _localSecurity?.ShutdownPreservingLock();
+                else
+                    _localSecurity?.DisableAllSecurity();
                 _localSecurity = null;
             }
             catch { }
@@ -217,15 +222,19 @@ public class UpdaterStatusForm : Form
             _localSecurity = new SecurityManager(db);
             _localSecurity.SetMainWindow(Handle);
             _localSecurity.SetKioskLock(true);
-            _localSecurity.EnableAllSecurity();
+            _localSecurity.RegisterAllowedProcessName("ApacKiosk");
+            _localSecurity.EnableAllSecurity(protectRegistry: false);
             _localSecurity.ForceHideTaskbar();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            UpdateManager.LogUpdate("UpdaterUI", $"Aviso ao ativar bloqueio em UpdaterStatusForm: {ex.Message}");
+        }
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (_isBusy && e.CloseReason == CloseReason.UserClosing)
+        if (!_handoverStarted && (_isBusy || _useServiceMode || File.Exists(_targetExe)) && e.CloseReason != CloseReason.ApplicationExitCall)
         {
             e.Cancel = true;
             return;
@@ -256,7 +265,8 @@ public class UpdaterStatusForm : Form
                     _expectedSha,
                     info => UpdateProgressUI(info),
                     newPid => _localSecurity?.RegisterAllowedProcess(newPid),
-                    CancellationToken.None);
+                    CancellationToken.None,
+                    () => _localSecurity?.RegisterAllowedProcessName("ApacKiosk"));
             }
 
             return UpdateManager.RunApplyUpdateCore(
@@ -271,6 +281,7 @@ public class UpdaterStatusForm : Form
         {
             ExitCode = 0;
             _isBusy = false;
+            _handoverStarted = true;
             _progressBar.BackColor = Color.FromArgb(16, 185, 129);
             UpdateProgressUI(new UpdateProgressInfo
             {
@@ -334,7 +345,7 @@ public class UpdaterStatusForm : Form
         _lblError.Text = errorMsg;
         _btnRetry.Visible = hasError;
         _btnLaunchTarget.Visible = hasError && File.Exists(_targetExe);
-        _btnClose.Visible = hasError && !_useServiceMode;
+        _btnClose.Visible = hasError && !_useServiceMode && !File.Exists(_targetExe);
     }
 
     private void LaunchTargetAndClose()
@@ -343,6 +354,7 @@ public class UpdaterStatusForm : Form
         {
             if (File.Exists(_targetExe))
             {
+                _localSecurity?.RegisterAllowedProcessName("ApacKiosk");
                 var proc = Process.Start(new ProcessStartInfo
                 {
                     FileName = _targetExe,
@@ -352,12 +364,17 @@ public class UpdaterStatusForm : Form
                 if (proc != null)
                 {
                     _localSecurity?.RegisterAllowedProcess(proc.Id);
+                    _handoverStarted = true;
+                    _localSecurity?.ShutdownPreservingLock();
+                    Close();
+                    return;
                 }
             }
         }
-        catch { }
-        _localSecurity?.ShutdownPreservingLock();
-        Close();
+        catch (Exception ex)
+        {
+            UpdateManager.LogUpdate("UpdaterUI", $"Falha ao relancar TargetExe: {ex.Message}");
+        }
     }
 
     private static Button CreateActionButton(string text, Point location, Size size, Color backColor)

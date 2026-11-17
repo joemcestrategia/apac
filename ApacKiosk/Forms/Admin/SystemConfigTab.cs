@@ -340,23 +340,7 @@ namespace ApacKiosk.Forms.Admin
 
         private void UpdateAutostartRegistry(bool enable)
         {
-            try
-            {
-                var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-                if (key == null) return;
-
-                if (enable)
-                {
-                    var exePath = Application.ExecutablePath;
-                    key.SetValue("ApacKioskGuardian", exePath);
-                }
-                else
-                {
-                    try { key.DeleteValue("ApacKioskGuardian", false); } catch { }
-                }
-                key.Close();
-            }
-            catch { }
+            AutostartManager.ConfigureAutostart(enable, Application.ExecutablePath);
         }
 
         private void ChangePassword()

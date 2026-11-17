@@ -4,8 +4,10 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using ApacKiosk.Database;
 using ApacKiosk.Interop;
+using ApacKiosk.Utils;
 
 namespace ApacKiosk.Services
 {
@@ -51,16 +53,22 @@ namespace ApacKiosk.Services
             _mainWindowHandle = handle;
         }
 
-        public void EnableAllSecurity()
+        public void EnableAllSecurity(bool protectRegistry = true, bool startWatchdog = true)
         {
             HideTaskbar();
+            SetupCtrlAltDelPolicy();
             if (_isRunning) return;
             _isRunning = true;
             EnableHotkeyBlock();
-            EnableWatchdog();
+            if (startWatchdog)
+            {
+                EnableWatchdog();
+            }
             EnableWindowProtector();
-            EnableRegistryProtector();
-            SetupCtrlAltDelPolicy();
+            if (protectRegistry)
+            {
+                EnableRegistryProtector();
+            }
         }
 
         public void ForceHideTaskbar() => HideTaskbar();
@@ -68,6 +76,7 @@ namespace ApacKiosk.Services
         public void DisableAllSecurity()
         {
             _isRunning = false;
+            RemoveCtrlAltDelPolicy(waitService: true);
             RestoreTaskbar();
             StopHook();
         }
@@ -76,6 +85,12 @@ namespace ApacKiosk.Services
         {
             _isRunning = false;
             StopHook();
+        }
+
+        public static void RestoreSystemShellAndPolicies(bool includeService = true)
+        {
+            RemoveCtrlAltDelPolicy(waitService: includeService);
+            RestoreTaskbarWindowsStatic();
         }
 
         private void EnableHotkeyBlock()
@@ -163,13 +178,81 @@ namespace ApacKiosk.Services
         {
             try
             {
-                using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
-                    @"Software\Microsoft\Windows\CurrentVersion\Policies\System");
-                key?.SetValue("DisableTaskMgr", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                if (UpdateManager.IsAdministrator())
+                {
+                    using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+                    WindowsUpdaterService.SetCtrlAltDelPoliciesForUser(id.User?.Value, true);
+                    return;
+                }
 
-                using var explorerKey = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
-                    @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer");
-                explorerKey?.SetValue("NoClose", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                try
+                {
+                    using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                        @"Software\Microsoft\Windows\CurrentVersion\Policies\System", true);
+                    key?.SetValue("DisableTaskMgr", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                    key?.SetValue("DisableLockWorkstation", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                    key?.SetValue("DisableChangePassword", 1, Microsoft.Win32.RegistryValueKind.DWord);
+
+                    using var explorerKey = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                        @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", true);
+                    explorerKey?.SetValue("NoClose", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                    explorerKey?.SetValue("NoLogoff", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                }
+                catch { }
+
+                Task.Run(() => WindowsUpdaterService.SetCtrlAltDelLockViaService(true));
+            }
+            catch { }
+        }
+
+        private static void RemoveCtrlAltDelPolicy(bool waitService)
+        {
+            if (UpdateManager.IsAdministrator())
+            {
+                try
+                {
+                    using var id = System.Security.Principal.WindowsIdentity.GetCurrent();
+                    WindowsUpdaterService.SetCtrlAltDelPoliciesForUser(id.User?.Value, false);
+                }
+                catch { }
+                return;
+            }
+
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\System", true);
+                if (key != null)
+                {
+                    key.DeleteValue("DisableTaskMgr", false);
+                    key.DeleteValue("DisableLockWorkstation", false);
+                    key.DeleteValue("DisableChangePassword", false);
+                }
+            }
+            catch { }
+
+            try
+            {
+                using var explorerKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer", true);
+                if (explorerKey != null)
+                {
+                    explorerKey.DeleteValue("NoClose", false);
+                    explorerKey.DeleteValue("NoLogoff", false);
+                }
+            }
+            catch { }
+
+            try
+            {
+                if (waitService)
+                {
+                    WindowsUpdaterService.SetCtrlAltDelLockViaService(false);
+                }
+                else
+                {
+                    Task.Run(() => WindowsUpdaterService.SetCtrlAltDelLockViaService(false));
+                }
             }
             catch { }
         }
@@ -293,22 +376,14 @@ namespace ApacKiosk.Services
             if (_registryProtectorThread != null && _registryProtectorThread.IsAlive) return;
             _registryProtectorThread = new Thread(() =>
             {
-                var autoStartPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
-                var appName = "APAC_Kiosk";
                 var appPath = Process.GetCurrentProcess().MainModule?.FileName ?? "";
                 while (_isRunning)
                 {
                     try
                     {
-                        using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(autoStartPath, true);
-                        if (key != null)
+                        if (!string.IsNullOrEmpty(appPath))
                         {
-                            var existing = key.GetValue(appName)?.ToString();
-                            if (existing != appPath)
-                            {
-                                key.SetValue(appName, appPath);
-                                _db.InsertLog(null, "system_event", null, "Chave de autostart recriada automaticamente");
-                            }
+                            AutostartManager.EnsureProtectedAutostart(_db, appPath);
                         }
                     }
                     catch { }
@@ -515,7 +590,9 @@ namespace ApacKiosk.Services
             return sb.ToString();
         }
 
-        private void RestoreTaskbar()
+        private void RestoreTaskbar() => RestoreTaskbarWindowsStatic();
+
+        private static void RestoreTaskbarWindowsStatic()
         {
             try
             {
@@ -531,7 +608,7 @@ namespace ApacKiosk.Services
                 if (taskbar != IntPtr.Zero)
                     ShowWindow(taskbar, SW_SHOW);
 
-                ShowDesktopIcons();
+                ShowDesktopIconsStatic();
             }
             catch { }
         }
@@ -567,7 +644,9 @@ namespace ApacKiosk.Services
             catch { }
         }
 
-        private void ShowDesktopIcons()
+        private void ShowDesktopIcons() => ShowDesktopIconsStatic();
+
+        private static void ShowDesktopIconsStatic()
         {
             try
             {

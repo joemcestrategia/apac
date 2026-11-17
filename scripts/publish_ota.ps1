@@ -1,10 +1,11 @@
-# ========================================================
+﻿# ========================================================
 # Script de Release OTA + Instalador Offline - APAC Kiosk Guardian
 # ========================================================
 param (
     [string]$Changelog = "Atualizador OTA à prova de falhas, janela de status em tempo real, rollback automático e instalador offline.",
     [string]$CustomVersion = "",
-    [switch]$SkipBuild = $false
+    [switch]$SkipBuild = $false,
+    [switch]$LocalOnly = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -193,6 +194,17 @@ Set-Content -Path $installerShaTxt -Value "$installerSha256 *$installerExeName"
 $installerSizeMB = [math]::Round(((Get-Item $installerExePath).Length / 1MB), 2)
 Write-Host "[PROCESSO: 75%] Instalador Offline gerado: $installerExePath ($installerSizeMB MB)" -ForegroundColor Green
 Write-Host "SHA-256 Instalador: $installerSha256" -ForegroundColor Gray
+
+if ($LocalOnly) {
+    Write-Host ""
+    Write-Host "==========================================================" -ForegroundColor Green
+    Write-Host "BUILD OFFLINE LOCAL CONCLUÍDO (v$nextVersion) — SEM PUSH/RELEASE NO GITHUB" -ForegroundColor Green
+    Write-Host "==========================================================" -ForegroundColor Green
+    Write-Host "OTA Executável     : $exePath" -ForegroundColor Cyan
+    Write-Host "Instalador Offline : $installerExePath" -ForegroundColor Cyan
+    Write-Host ""
+    exit 0
+}
 
 # 7. Git commit e tag
 Write-Host ""

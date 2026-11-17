@@ -1529,6 +1529,8 @@ namespace ApacKiosk.Forms
                 return;
             }
             e.Cancel = true;
+            if (e.CloseReason == CloseReason.WindowsShutDown || e.CloseReason == CloseReason.TaskManagerClosing)
+                return;
 
             var (result, pwd) = KioskDialog.ShowPasswordPrompt(
                 "Digite a senha de administrador para fechar o sistema:",

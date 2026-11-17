@@ -61,21 +61,7 @@ public static class UninstallHelper
 
     public static void RemoveAutostart()
     {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-            key?.DeleteValue("APAC Kiosk Guardian", false);
-            key?.DeleteValue("ApacKioskGuardian", false);
-        }
-        catch { }
-
-        try
-        {
-            using var cuKey = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-            cuKey?.DeleteValue("APAC Kiosk Guardian", false);
-            cuKey?.DeleteValue("ApacKioskGuardian", false);
-        }
-        catch { }
+        AutostartManager.RemoveAllAutostart();
     }
 
     public static void RemoveShortcuts()
@@ -102,6 +88,7 @@ public static class UninstallHelper
     public static void ExecuteFullUninstall(bool purgeData)
     {
         int myPid = Process.GetCurrentProcess().Id;
+        Services.SecurityManager.RestoreSystemShellAndPolicies(includeService: true);
         Services.WindowsUpdaterService.UninstallService();
         var procs = Process.GetProcessesByName("ApacKiosk");
         foreach (var p in procs)

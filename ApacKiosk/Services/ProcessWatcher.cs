@@ -12,9 +12,12 @@ namespace ApacKiosk.Services
     public class ProcessWatcher : IDisposable
     {
         private readonly DatabaseManager _db;
+        private readonly Action<Process, string>? _killActionOverride;
         private Thread _watcherThread;
         private volatile bool _isRunning;
+        private volatile bool _isPaused;
         private readonly HashSet<int> _allowedPids = new();
+        private readonly HashSet<string> _allowedProcessNames = new(StringComparer.OrdinalIgnoreCase);
         private readonly object _lockAllowedPids = new();
         private int _suspiciousCount;
 
@@ -22,13 +25,14 @@ namespace ApacKiosk.Services
         {
             "System", "Idle", "Registry", "Memory Compression",
             "wininit.exe", "csrss.exe", "smss.exe", "services.exe",
-            "lsass.exe", "winlogon.exe", "svchost.exe", "explorer.exe",
+            "lsass.exe", "winlogon.exe", "userinit.exe", "svchost.exe", "explorer.exe",
             "dwm.exe", "spoolsv.exe", "fontdrvhost.exe", "RuntimeBroker.exe",
             "ShellExperienceHost.exe", "SearchIndexer.exe", "SecurityHealthService.exe",
             "SecurityHealthSystray.exe", "TextInputHost.exe", "ctfmon.exe",
             "sihost.exe", "taskhostw.exe", "ApplicationFrameHost.exe",
             "SystemSettings.exe", "StartMenuExperienceHost.exe",
             "Widgets.exe", "audiodg.exe", "LogonUI.exe", "WUDFHost.exe",
+            "ApacUpdaterHost.exe", "ApacHostRefresher.exe", "ApacKioskUninstall.exe"
         };
 
         private static readonly HashSet<string> _knownChildren = new(StringComparer.OrdinalIgnoreCase)
@@ -38,9 +42,10 @@ namespace ApacKiosk.Services
             "conhost.exe",
         };
 
-        public ProcessWatcher(DatabaseManager db)
+        public ProcessWatcher(DatabaseManager db, Action<Process, string>? killActionOverride = null)
         {
             _db = db;
+            _killActionOverride = killActionOverride;
         }
 
         public int SuspiciousCount
@@ -50,6 +55,7 @@ namespace ApacKiosk.Services
 
         public void Start()
         {
+            _isPaused = false;
             if (_isRunning) return;
             _isRunning = true;
             _watcherThread = new Thread(Run)
@@ -63,6 +69,16 @@ namespace ApacKiosk.Services
         public void Stop()
         {
             _isRunning = false;
+        }
+
+        public void Pause()
+        {
+            _isPaused = true;
+        }
+
+        public void Resume()
+        {
+            _isPaused = false;
         }
 
         public void RegisterAllowedProcess(int pid)
@@ -81,14 +97,51 @@ namespace ApacKiosk.Services
             }
         }
 
+        public void RegisterAllowedProcessName(string processName)
+        {
+            if (string.IsNullOrWhiteSpace(processName)) return;
+            string nameOnly = Path.GetFileName(processName);
+            if (!nameOnly.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                nameOnly += ".exe";
+            lock (_lockAllowedPids)
+            {
+                _allowedProcessNames.Add(nameOnly);
+            }
+        }
+
+        public void UnregisterAllowedProcessName(string processName)
+        {
+            if (string.IsNullOrWhiteSpace(processName)) return;
+            string nameOnly = Path.GetFileName(processName);
+            if (!nameOnly.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                nameOnly += ".exe";
+            lock (_lockAllowedPids)
+            {
+                _allowedProcessNames.Remove(nameOnly);
+            }
+        }
+
         private void Run()
         {
             var myPid = 0;
-            try { myPid = Environment.ProcessId; } catch { }
+            var mySessionId = -1;
+            try
+            {
+                myPid = Environment.ProcessId;
+                using var self = Process.GetCurrentProcess();
+                mySessionId = self.SessionId;
+            }
+            catch { }
             var appExeName = "ApacKiosk.exe";
 
             while (_isRunning)
             {
+                if (_isPaused)
+                {
+                    Thread.Sleep(150);
+                    continue;
+                }
+
                 try
                 {
                     var (allowedNames, allowedPaths) = BuildAllowedDataFromDatabase();
@@ -97,10 +150,12 @@ namespace ApacKiosk.Services
                     var processes = Process.GetProcesses();
                     foreach (var proc in processes)
                     {
-                        if (!_isRunning) break;
+                        if (!_isRunning || _isPaused) break;
                         try
                         {
                             if (proc.Id == myPid) continue;
+                            if (proc.SessionId == 0) continue;
+                            if (mySessionId >= 0 && proc.SessionId != mySessionId) continue;
                             if (proc.HasExited) continue;
 
                             string procName;
@@ -112,7 +167,7 @@ namespace ApacKiosk.Services
 
                             lock (_lockAllowedPids)
                             {
-                                if (_allowedPids.Contains(proc.Id)) continue;
+                                if (_allowedPids.Contains(proc.Id) || _allowedProcessNames.Contains(procName)) continue;
                             }
 
                             if (allowedNames.Contains(procName))
@@ -132,6 +187,10 @@ namespace ApacKiosk.Services
                             KillProcess(proc, procName);
                         }
                         catch { }
+                        finally
+                        {
+                            try { proc.Dispose(); } catch { }
+                        }
                     }
                 }
                 catch { }
@@ -249,6 +308,12 @@ namespace ApacKiosk.Services
 
         private void KillProcess(Process proc, string procName)
         {
+            if (_killActionOverride != null)
+            {
+                try { _killActionOverride(proc, procName); } catch { }
+                return;
+            }
+
             try
             {
                 proc.Kill();

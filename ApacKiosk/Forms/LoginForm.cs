@@ -54,6 +54,7 @@ namespace ApacKiosk.Forms
         private volatile bool _isShuttingDown;
         public Models.User LoggedInUser { get; private set; }
         public bool IsAdmin { get; private set; }
+        public bool AuthorizedShutdown { get; private set; }
 
         public LoginForm(DatabaseManager db, ConfigManager config)
         {
@@ -757,6 +758,7 @@ namespace ApacKiosk.Forms
                 var hash = cmd.ExecuteScalar()?.ToString();
                 if (hash != null && BCrypt.Net.BCrypt.Verify(pwd, hash))
                 {
+                    AuthorizedShutdown = true;
                     _isShuttingDown = true;
                     Program.Security?.DisableAllSecurity();
                     Close();
@@ -827,7 +829,10 @@ namespace ApacKiosk.Forms
             }
 
             e.Cancel = true;
-            ShowShutdownPrompt();
+            if (e.CloseReason != CloseReason.WindowsShutDown && e.CloseReason != CloseReason.TaskManagerClosing)
+            {
+                ShowShutdownPrompt();
+            }
         }
 
         private void DoUserLogin()

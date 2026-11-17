@@ -79,7 +79,25 @@ static class Program
             return;
         }
 
-        bool hasPostUpdateWait = args.Any(a => a.Equals("--cleanup-updates", StringComparison.OrdinalIgnoreCase) || a.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase));
+        bool hasPostUpdateWait = args.Any(a =>
+            a.Equals("--cleanup-updates", StringComparison.OrdinalIgnoreCase) ||
+            a.StartsWith("--wait-pid=", StringComparison.OrdinalIgnoreCase) ||
+            a.StartsWith("--boot-token=", StringComparison.OrdinalIgnoreCase));
+
+        if (!hasPostUpdateWait)
+        {
+            try
+            {
+                if (Mutex.TryOpenExisting(Services.UpdateManager.UpdateInProgressMutexName, out var updateInProgressMutex))
+                {
+                    updateInProgressMutex.Dispose();
+                    Trace("Atualização em andamento; encerrando instância concorrente silenciosamente.");
+                    return;
+                }
+            }
+            catch { }
+        }
+
         int maxMutexAttempts = hasPostUpdateWait ? 24 : 5;
         bool isNewInstance = false;
 
@@ -117,6 +135,10 @@ static class Program
             var msg = ex?.ToString() ?? e.ExceptionObject?.ToString();
             try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "ApacKiosk_Crash.log"), $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] UnhandledException: {msg}\n"); } catch { }
             try { FolderEnvironment?.RestoreOriginalEnvironment(); } catch { }
+            if (e.IsTerminating)
+            {
+                try { Services.SecurityManager.RestoreSystemShellAndPolicies(includeService: false); } catch { }
+            }
         };
         Application.ThreadException += (s, e) =>
         {
@@ -161,6 +183,7 @@ static class Program
         }
 
         Config = new Utils.ConfigManager(Db);
+        SetupAutostart();
         FolderEnvironment = new Services.UserFolderEnvironmentService(Db);
         FolderEnvironment.RestoreOriginalEnvironment();
         AppDomain.CurrentDomain.ProcessExit += (_, _) =>
@@ -332,8 +355,13 @@ static class Program
             using var loginForm = new LoginForm(Db, Config);
             if (loginForm.ShowDialog() != DialogResult.OK)
             {
-                Trace("Login cancelado, encerrando");
-                break;
+                if (loginForm.AuthorizedShutdown)
+                {
+                    Trace("Login cancelado com senha de administrador, encerrando");
+                    break;
+                }
+                Trace("LoginForm encerrado sem autorizacao; mantendo bloqueio.");
+                continue;
             }
 
             Trace($"Login OK, IsAdmin={loginForm.IsAdmin}, User={loginForm.LoggedInUser?.Username}");
@@ -421,6 +449,7 @@ static class Program
     {
         try
         {
+            ProcessWatcher?.Pause();
             FileDialogBlocker?.SetRestrictionActive(false);
             FolderEnvironment?.RestoreOriginalEnvironment();
         }
@@ -445,6 +474,7 @@ static class Program
     {
         try
         {
+            ProcessWatcher?.Stop();
             FileDialogBlocker?.SetRestrictionActive(false);
             FolderEnvironment?.RestoreOriginalEnvironment();
             Security?.ShutdownPreservingLock();
@@ -463,6 +493,8 @@ static class Program
             {
                 _singleInstanceMutex = new Mutex(true, "Global\\APACKioskGuardian_SingleInstance", out _);
             }
+
+            ProcessWatcher?.Resume();
 
             if (restoredFromElevation && Security != null)
             {
@@ -559,20 +591,7 @@ static class Program
     {
         try
         {
-            using var key = Registry.LocalMachine.OpenSubKey(
-                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-
-            if (key == null) return;
-
-            if (Config.AutostartEnabled)
-            {
-                var exePath = Application.ExecutablePath;
-                key.SetValue("ApacKioskGuardian", exePath);
-            }
-            else
-            {
-                try { key.DeleteValue("ApacKioskGuardian", false); } catch { }
-            }
+            AutostartManager.ConfigureAutostart(Config.AutostartEnabled, Application.ExecutablePath);
         }
         catch { }
     }
