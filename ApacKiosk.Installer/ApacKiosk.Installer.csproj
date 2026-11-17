@@ -6,13 +6,13 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AssemblyName>Instalador_ApacKiosk_v1.0.9.2</AssemblyName>
+    <AssemblyName>Instalador_ApacKiosk_v1.0.9.3</AssemblyName>
     <RootNamespace>ApacKiosk.Installer</RootNamespace>
     <ApplicationIcon>icon.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.0.9.2</Version>
-    <FileVersion>1.0.9.2</FileVersion>
-    <AssemblyVersion>1.0.9.2</AssemblyVersion>
+    <Version>1.0.9.3</Version>
+    <FileVersion>1.0.9.3</FileVersion>
+    <AssemblyVersion>1.0.9.3</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
